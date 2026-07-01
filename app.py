@@ -161,6 +161,19 @@ NAVIGATION_LINK_TERMS = (
     "under development",
     "sector",
 )
+ICR_GENERIC_TITLE_LABELS = {
+    "and public",
+    "approved icr methodologies",
+    "approved methodologies",
+    "current stage",
+    "date of first approval",
+    "icr methodologies",
+    "methodology development",
+    "next",
+    "previous",
+    "sectoral scope",
+    "under development",
+}
 GENERIC_NAV_TERMS = {
     "about",
     "account",
@@ -768,9 +781,44 @@ def clean_icr_methodology_title(text: str, code: str = "") -> str:
     title = re.sub(r"\b(previous|next|international carbon registry|documentation|icr program)\b", "", title, flags=re.IGNORECASE)
     title = re.sub(r"\b(approved|active|valid|draft|consultation|under development)\b", "", title, flags=re.IGNORECASE)
     title = normalize_text(title.strip(" :-|"))
-    if not title or looks_like_url(title) or title.lower() in GENERIC_NAV_TERMS:
+    if not is_plausible_icr_methodology_title(title):
         return ""
     return title
+
+
+def is_plausible_icr_methodology_title(title: str) -> bool:
+    value = normalize_text(title)
+    value_l = value.lower().strip(" :-|")
+    if not value or looks_like_url(value):
+        return False
+    if value_l in ICR_GENERIC_TITLE_LABELS or value_l in GENERIC_NAV_TERMS:
+        return False
+    if any(value_l == term or value_l.startswith(f"{term}:") for term in ICR_GENERIC_TITLE_LABELS):
+        return False
+    if value_l.startswith(("and ", "or ")):
+        return False
+    if extract_status(value) or extract_version(value):
+        return False
+    if re.fullmatch(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}", value_l):
+        return False
+    alpha_words = re.findall(r"[a-zA-Z][a-zA-Z-]{2,}", value)
+    if len(value) < 12 or len(alpha_words) < 2:
+        return False
+    return True
+
+
+def icr_code_pattern(code: str):
+    return re.compile(re.escape(code).replace(r"\ ", r"\s*").replace(r"\-", r"[-\s]?"), re.IGNORECASE)
+
+
+def icr_title_from_code_block(text: str, code: str) -> tuple[str, bool]:
+    code_pattern = icr_code_pattern(code)
+    if not code_pattern.search(text or ""):
+        return "", False
+    title = clean_icr_methodology_title(text, code)
+    if title:
+        return title, False
+    return "", True
 
 
 def is_pdf_or_document_url(url: str) -> bool:
@@ -778,20 +826,23 @@ def is_pdf_or_document_url(url: str) -> bool:
     return parsed_path.endswith((".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"))
 
 
-def title_from_icr_detail_page(response_text: str, code: str) -> tuple[str, str]:
+def title_from_icr_detail_page(response_text: str, code: str) -> tuple[str, str, int]:
     soup = BeautifulSoup(response_text, "html.parser")
-    code_pattern = re.compile(re.escape(code).replace(r"\ ", r"\s*").replace(r"\-", r"[-\s]?"), re.IGNORECASE)
+    code_pattern = icr_code_pattern(code)
+    suspicious_rejections = 0
 
     h1 = soup.find("h1")
     if h1:
-        title = clean_icr_methodology_title(h1.get_text(" ", strip=True), code)
+        title, rejected = icr_title_from_code_block(h1.get_text(" ", strip=True), code)
+        suspicious_rejections += int(rejected)
         if title:
-            return title, "detail page h1"
+            return title, "detail page h1", suspicious_rejections
 
     page_title = soup.title.get_text(" ", strip=True) if soup.title else ""
-    title = clean_icr_methodology_title(page_title, code)
+    title, rejected = icr_title_from_code_block(page_title, code)
+    suspicious_rejections += int(rejected)
     if title:
-        return title, "detail page title"
+        return title, "detail page title", suspicious_rejections
 
     for heading in soup.find_all(["h2", "h3"]):
         heading_text = normalize_text(heading.get_text(" ", strip=True))
@@ -800,9 +851,10 @@ def title_from_icr_detail_page(response_text: str, code: str) -> tuple[str, str]
             sibling_text = normalize_text(f"{sibling_text} {sibling.get_text(' ', strip=True)}")
         context = normalize_text(f"{heading_text} {sibling_text}")
         if code_pattern.search(context):
-            title = clean_icr_methodology_title(heading_text, code) or clean_icr_methodology_title(context, code)
+            title, rejected = icr_title_from_code_block(context, code)
+            suspicious_rejections += int(rejected)
             if title:
-                return title, "detail page heading near code"
+                return title, "detail page heading near code", suspicious_rejections
 
     visible_lines = [
         normalize_text(line)
@@ -811,14 +863,15 @@ def title_from_icr_detail_page(response_text: str, code: str) -> tuple[str, str]
     ]
     for line in visible_lines:
         if code_pattern.search(line):
-            title = clean_icr_methodology_title(line, code)
+            title, rejected = icr_title_from_code_block(line, code)
+            suspicious_rejections += int(rejected)
             if title:
-                return title, "detail page text line containing code"
+                return title, "detail page text line containing code", suspicious_rejections
 
-    return "", ""
+    return "", "", suspicious_rejections
 
 
-def fetch_icr_detail_title(document_url: str, code: str, allow_insecure_ssl: bool) -> tuple[str, str, dict | None, bool]:
+def fetch_icr_detail_title(document_url: str, code: str, allow_insecure_ssl: bool) -> tuple[str, str, dict | None, bool, int]:
     url = clean_url(document_url)
     if not is_fetchable_url(url):
         return "", "", make_extraction_error(
@@ -827,9 +880,9 @@ def fetch_icr_detail_title(document_url: str, code: str, allow_insecure_ssl: boo
             "invalid_detail_url",
             "ICR detail URL is missing or is not an HTTP/HTTPS URL.",
             "Review the index-page candidate manually.",
-        ), False
+        ), False, 0
     if is_pdf_or_document_url(url):
-        return "", "", None, False
+        return "", "", None, False, 0
     try:
         response = requests.get(
             url,
@@ -845,7 +898,7 @@ def fetch_icr_detail_title(document_url: str, code: str, allow_insecure_ssl: boo
             "icr_detail_fetch_failed",
             str(exc),
             "Open the detail page manually or retry later.",
-        ), False
+        ), False, 0
     if response.status_code != 200:
         return "", "", make_extraction_error(
             "International Carbon Registry / ICR",
@@ -853,11 +906,11 @@ def fetch_icr_detail_title(document_url: str, code: str, allow_insecure_ssl: boo
             "icr_detail_non_200_status",
             f"Non-200 status: {response.status_code}",
             "Open the detail page manually or retry later.",
-        ), False
+        ), False, 0
     if "html" not in response.headers.get("content-type", "").lower():
-        return "", "", None, False
-    title, source = title_from_icr_detail_page(response.text, code)
-    return title, source, None, True
+        return "", "", None, False, 0
+    title, source, suspicious_rejections = title_from_icr_detail_page(response.text, code)
+    return title, source, None, True, suspicious_rejections
 
 
 def enrich_icr_candidates_from_detail_pages(
@@ -872,6 +925,7 @@ def enrich_icr_candidates_from_detail_pages(
         "icr_titles_extracted": 0,
         "icr_titles_still_requiring_review": 0,
         "icr_fetch_failures": 0,
+        "icr_suspicious_titles_rejected": 0,
     }
 
     for candidate in candidates:
@@ -888,15 +942,22 @@ def enrich_icr_candidates_from_detail_pages(
         document_url = clean_url(candidate.get("document_url", ""))
         code = normalize_text(candidate.get("methodunit_code", ""))
 
+        if existing_title and existing_title != "Title requires review" and not is_plausible_icr_methodology_title(existing_title):
+            candidate["methodunit_name"] = "Title requires review"
+            existing_title = "Title requires review"
+            candidate["confidence"] = "medium"
+            metrics["icr_suspicious_titles_rejected"] += 1
+
         if existing_title and existing_title != "Title requires review":
             candidate["notes"] = normalize_text(f"{candidate.get('notes', '')} Title from index page.")
 
         if document_url:
-            detail_title, detail_source, error, fetched = fetch_icr_detail_title(
+            detail_title, detail_source, error, fetched, suspicious_rejections = fetch_icr_detail_title(
                 document_url,
                 code,
                 allow_insecure_ssl,
             )
+            metrics["icr_suspicious_titles_rejected"] += suspicious_rejections
             if fetched:
                 metrics["icr_detail_pages_fetched"] += 1
             if error:
@@ -905,7 +966,7 @@ def enrich_icr_candidates_from_detail_pages(
             if detail_title:
                 candidate["methodunit_name"] = detail_title
                 candidate["notes"] = normalize_text(f"{candidate.get('notes', '')} Title enriched from {detail_source}.")
-                if candidate.get("methodunit_code") and candidate.get("status") and candidate.get("document_url"):
+                if candidate.get("methodunit_code") and is_plausible_icr_methodology_title(detail_title) and candidate.get("document_url"):
                     candidate["confidence"] = "high"
                 else:
                     candidate["confidence"] = "medium"
@@ -914,7 +975,7 @@ def enrich_icr_candidates_from_detail_pages(
         if not normalize_text(candidate.get("methodunit_name", "")) or candidate.get("methodunit_name") == "Title requires review":
             candidate["methodunit_name"] = "Title requires review"
             candidate["confidence"] = "medium"
-            candidate["notes"] = normalize_text(f"{candidate.get('notes', '')} title missing; detail page review required.")
+            candidate["notes"] = "M-ICR code found; title not confidently extracted"
             metrics["icr_titles_still_requiring_review"] += 1
 
         enriched.append(candidate)
@@ -1182,7 +1243,7 @@ def candidate_from_text_and_link(
         unit_type = "adopted_external_method"
         notes = "Appears to be adopted from CDM."
     confidence = "high" if name and document_url and (code or source_kind == "car") else "medium"
-    if source_kind == "icr" and code and name and name != "Title requires review" and status:
+    if source_kind == "icr" and code and is_plausible_icr_methodology_title(name) and document_url:
         confidence = "high"
     elif source_kind == "icr" and code:
         confidence = "medium"
@@ -1254,9 +1315,9 @@ def extract_table_candidates(profile: dict, soup, source_url: str, source_kind: 
             candidate_name = clean_icr_methodology_title(title, code) if source_kind == "icr" else clean_candidate_name(title, code)
             if source_kind == "icr" and code and not candidate_name:
                 candidate_name = "Title requires review"
-                candidate_notes = "title missing; detail page review required."
+                candidate_notes = "M-ICR code found; title not confidently extracted"
             confidence = "high" if candidate_name and candidate_name != "Title requires review" and (row_link or code) else "medium"
-            if source_kind == "icr" and code and candidate_name and candidate_name != "Title requires review" and status:
+            if source_kind == "icr" and code and is_plausible_icr_methodology_title(candidate_name) and row_link:
                 confidence = "high"
             candidates.append(
                 make_candidate(
@@ -1431,6 +1492,7 @@ def run_candidate_extractors(
         "icr_titles_extracted": 0,
         "icr_titles_still_requiring_review": 0,
         "icr_fetch_failures": 0,
+        "icr_suspicious_titles_rejected": 0,
     }
     for extractor_name in selected_extractors:
         extractor = extractor_map.get(extractor_name)
@@ -2053,6 +2115,7 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
             ("ICR titles extracted", int(enrichment_metrics.get("icr_titles_extracted", 0) or 0)),
             ("ICR titles still requiring review", int(enrichment_metrics.get("icr_titles_still_requiring_review", 0) or 0)),
             ("ICR fetch failures", int(enrichment_metrics.get("icr_fetch_failures", 0) or 0)),
+            ("ICR suspicious titles rejected", int(enrichment_metrics.get("icr_suspicious_titles_rejected", 0) or 0)),
         ]
     )
 
