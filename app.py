@@ -209,7 +209,7 @@ PAGE_SUMMARIES = {
     "home": "A board-level view of source coverage, automation readiness, and review risk across programmes.",
     "coverage": "Use this page to understand which programmes already have rows, where source status is unresolved, and how confident the source profile is.",
     "profiles": "Searchable source intelligence for each programme: official source locations, connector type, extraction strategy, confidence, and notes.",
-    "connectors": "Connector archetypes grouped by source pattern, with reusability and maintenance implications.",
+    "connectors": "Extraction archetypes grouped by source pattern, with reusability and maintenance implications.",
     "waves": "A pragmatic ingestion roadmap: automate stable catalogues first, then handle semi-automated, manual, and unresolved sources.",
     "qa": "Open source-quality concerns that should be resolved before or during ingestion.",
     "actions": "The operating queue for what to do next by programme, priority, wave, and confidence.",
@@ -317,7 +317,7 @@ def pretty_label(column: str) -> str:
         "method_source_url": "Method Source URL",
         "terminology_used": "Terminology Used",
         "source_type": "Source Type",
-        "connector_type": "Connector Type",
+        "connector_type": "Source Pattern",
         "extraction_strategy": "Extraction Strategy",
         "automation_priority": "Automation Priority",
         "maintenance_burden": "Maintenance Burden",
@@ -336,7 +336,7 @@ def pretty_label(column: str) -> str:
         "populated_source_status": "Source Status",
         "methodology_rows": "Methodology Rows",
         "standards": "Standards",
-        "reusable_connector": "Reusable Connector",
+        "reusable_connector": "Reusable Extractor",
         "source_url": "Source URL",
         "checked_at": "Checked At",
         "status_code": "Status Code",
@@ -1650,20 +1650,20 @@ def start_here_page(data: dict[str, pd.DataFrame]) -> None:
     st.subheader("The Role of This App")
     st.write(
         "This is an upstream SourceOps layer for methodology catalogues. It does not replace the catalogue. "
-        "It organizes source locations, runs bounded Connector checks, extracts Candidate MethodUnits, preserves Evidence Links, "
-        "surfaces QA Exceptions, and prepares reviewed outputs for Catalogue Export."
+        "It organizes source locations, checks official pages, extracts possible methodology/protocol records, preserves Supporting Links, "
+        "surfaces Issues to Resolve, and prepares reviewed outputs for Export for Catalogue."
     )
 
     st.subheader("Pipeline")
     st.write(
-        "Source Registry -> Live Source Check -> Connector Extraction -> Candidate MethodUnits -> "
-        "Evidence Links -> QA Exceptions -> Review -> Catalogue Export"
+        "Source Registry -> Live Source Check -> Source-Specific Extraction -> Extracted Methodology Records -> "
+        "Supporting Links -> Issues to Resolve -> Review -> Export for Catalogue"
     )
 
     st.subheader("What This Prototype Proves")
     st.write(
-        "The app can load a 61-programme Source Registry, check selected public source URLs, run three controlled Connectors, "
-        "separate Candidate MethodUnits from supporting links, log source-access exceptions, and export review-ready CSVs."
+        "The app can load a 61-programme Source Registry, check selected public source URLs, run three controlled source-specific extractors, "
+        "separate extracted methodology records from supporting links, log source-access issues, and export review-ready CSVs."
     )
 
     st.subheader("What It Does Not Yet Do")
@@ -1676,35 +1676,35 @@ def start_here_page(data: dict[str, pd.DataFrame]) -> None:
     capability_rows = [
         {"Capability": "Source Registry", "Current State": f"{total_programmes or 61} programmes loaded"},
         {"Capability": "Live Source Check", "Current State": "working"},
-        {"Capability": "Climate Action Reserve connector", "Current State": "working structured-table extraction"},
-        {"Capability": "ICR connector", "Current State": "discovery-only / pending review"},
+        {"Capability": "Climate Action Reserve extractor", "Current State": "working structured-table extraction"},
+        {"Capability": "ICR extractor", "Current State": "discovery-only / pending review"},
         {"Capability": "Asia Carbon Institute", "Current State": "source-access issue due to SSL"},
-        {"Capability": "Candidate Review", "Current State": "prototype"},
-        {"Capability": "Export", "Current State": "working"},
+        {"Capability": "Review Extracted Records", "Current State": "prototype"},
+        {"Capability": "Export for Catalogue", "Current State": "working"},
         {"Capability": "Persistent database", "Current State": "not yet"},
     ]
     st.dataframe(pd.DataFrame(capability_rows), hide_index=True, use_container_width=True)
 
     st.subheader("How to Read the Rest of the App")
     st.write(
-        "Start with Extraction Strategies and Current Capabilities for context. Then inspect Source Registry, run Connectors, "
-        "review Candidate MethodUnits, audit Evidence Links, resolve QA Exceptions, and export only reviewed records."
+        "Start with Extraction Strategies and Current Capabilities for context. Then inspect Source Registry, extract from sources, "
+        "review extracted records, audit Supporting Links, resolve issues, and export only reviewed records."
     )
 
 
 def extraction_strategies_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Extraction Strategies")
-    page_summary("Use this page to understand why SourceOps needs multiple Connector patterns instead of one generic scraper.")
+    page_summary("Use this page to understand why SourceOps needs multiple extraction strategies instead of one generic scraper.")
     st.write(
         "One generic scraper is not enough because carbon standards publish methodology information through very different source patterns. "
-        "A reliable workflow needs source-specific Connectors, bounded extraction rules, and human review."
+        "A reliable workflow needs source-specific extractors, bounded extraction rules, and human review."
     )
 
     rows = [
         {
             "Source Archetype": "Structured HTML table",
             "Example Sources": "Climate Action Reserve",
-            "Extraction Strategy": "Parse the official table, preserve source/detail links, classify rows as Candidate MethodUnits.",
+            "Extraction Strategy": "Parse the official table, preserve source/detail links, classify rows as extracted methodology records.",
             "Current Status": "Implemented for CAR",
             "Role of AI": "Assist review and duplicate detection, not blind scraping.",
         },
@@ -1732,15 +1732,15 @@ def extraction_strategies_page(data: dict[str, pd.DataFrame]) -> None:
         {
             "Source Archetype": "JS-heavy portal",
             "Example Sources": "Verra, Gold Standard, Isometric, Riverse",
-            "Extraction Strategy": "Use explicit connector/API/network analysis later; do not treat as simple HTML scraping.",
+            "Extraction Strategy": "Use explicit source-specific analysis later; do not treat as simple HTML scraping.",
             "Current Status": "Not implemented",
             "Role of AI": "Assist mapping fields once official access pattern is understood.",
         },
         {
             "Source Archetype": "No clear methodology page",
             "Example Sources": "Small or unresolved programmes",
-            "Extraction Strategy": "Manual source profile, monitoring, and QA Exception tracking.",
-            "Current Status": "Represented in Source Registry and QA Exceptions",
+            "Extraction Strategy": "Manual source profile, monitoring, and issue tracking.",
+            "Current Status": "Represented in Source Registry and Issues to Resolve",
             "Role of AI": "Assist source triage and reviewer notes.",
         },
     ]
@@ -1753,35 +1753,35 @@ def extraction_strategies_page(data: dict[str, pd.DataFrame]) -> None:
 
 def current_capabilities_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Current Capabilities")
-    page_summary("Use this page to see what the prototype can do today and where the Connector roadmap still has gaps.")
+    page_summary("Use this page to see what the prototype can do today and where the extraction roadmap still has gaps.")
 
     capabilities = [
         "Check whether selected source URLs are reachable.",
         "Extract Climate Action Reserve protocol table candidates.",
         "Discover ICR M-ICR methodology codes and detail URLs.",
-        "Log Asia Carbon Institute SSL/source-access failure as a QA Exception.",
-        "Classify Evidence Links into methodunit_candidate, supporting_document, development_page, navigation_link, and exclude.",
-        "Export Candidate MethodUnits, Evidence Links, QA flags, Source Registry records, and extraction errors.",
+        "Log Asia Carbon Institute SSL/source-access failure as an issue to resolve.",
+        "Classify Supporting Links into methodunit_candidate, supporting_document, development_page, navigation_link, and exclude.",
+        "Export extracted methodology records, Supporting Links, QA flags, Source Registry records, and extraction errors.",
     ]
     for item in capabilities:
         st.write(f"- {item}")
 
-    st.subheader("Connector Status")
+    st.subheader("Extractor Status")
     connector_rows = [
-        {"Connector": "CAR", "Status": "working connector", "Interpretation": "Structured protocol table extraction is working."},
-        {"Connector": "ICR", "Status": "discovery-only / needs title review", "Interpretation": "M-ICR codes and detail URLs are discovered, but titles require cautious review."},
-        {"Connector": "ACI", "Status": "blocked/source exception", "Interpretation": "Public source may fail SSL verification; error is logged instead of bypassed by default."},
-        {"Connector": "CFC", "Status": "reachable but not yet implemented", "Interpretation": "Good candidate for a later small-standard connector."},
-        {"Connector": "ACR", "Status": "stale URL to repair before connector", "Interpretation": "Fix Source Registry URL before building connector."},
-        {"Connector": "CDM", "Status": "reachable/review", "Interpretation": "Large source; needs careful scoped connector design."},
+        {"Extractor": "CAR", "Status": "working extractor", "Interpretation": "Structured protocol table extraction is working."},
+        {"Extractor": "ICR", "Status": "discovery-only / needs title review", "Interpretation": "M-ICR codes and detail URLs are discovered, but titles require cautious review."},
+        {"Extractor": "ACI", "Status": "blocked/source exception", "Interpretation": "Public source may fail SSL verification; error is logged instead of bypassed by default."},
+        {"Extractor": "CFC", "Status": "reachable but not yet implemented", "Interpretation": "Good candidate for a later small-standard extractor."},
+        {"Extractor": "ACR", "Status": "stale URL to repair before extractor", "Interpretation": "Fix Source Registry URL before building extraction logic."},
+        {"Extractor": "CDM", "Status": "reachable/review", "Interpretation": "Large source; needs careful scoped extraction design."},
     ]
     st.dataframe(pd.DataFrame(connector_rows), hide_index=True, use_container_width=True)
 
     st.subheader("Current Session Counts")
     metric_row(
         [
-            ("Candidate MethodUnits", len(current_methodunit_candidates())),
-            ("Evidence Links", len(current_extracted_links())),
+            ("Extracted Methodology Records", len(current_methodunit_candidates())),
+            ("Supporting Links", len(current_extracted_links())),
             ("Extraction errors", len(current_extraction_errors())),
             ("Live source failures", len(current_live_source_failures())),
         ]
@@ -1789,32 +1789,32 @@ def current_capabilities_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def interpreting_outputs_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Interpreting Outputs")
-    page_summary("Use this page before reviewing exported CSVs. It explains what each SourceOps output means and what it does not mean.")
+    st.header("How to Read the Outputs")
+    page_summary("Use this page before reviewing exported CSVs. It explains what each output means and what it does not mean.")
 
     rows = [
         {
             "Term": "Candidate MethodUnit",
-            "Meaning": "A possible methodology, protocol, module, or adopted external method extracted from an official source.",
+            "Meaning": "A possible methodology/protocol record found by the app.",
             "How to Interpret": "It is not approved for catalogue ingestion until reviewed.",
         },
         {
-            "Term": "Evidence Link",
-            "Meaning": "A source URL captured during Connector extraction, including candidates, supporting documents, development pages, navigation links, and excluded rows.",
-            "How to Interpret": "Useful links are preserved even when separated from Candidate MethodUnits.",
+            "Term": "Supporting Link",
+            "Meaning": "A source URL captured during extraction, including PDFs, FAQs, templates, guidance pages, development pages, navigation links, and excluded links.",
+            "How to Interpret": "Useful links are preserved even when they are not treated as methodology records.",
         },
         {
-            "Term": "QA Exception",
+            "Term": "Issue to Resolve",
             "Meaning": "A data-quality issue, source-access failure, extraction error, or review-needed record.",
-            "How to Interpret": "Resolve or document before Catalogue Export when material.",
+            "How to Interpret": "Resolve or document before Export for Catalogue when material.",
         },
         {
             "Term": "Review Queue",
-            "Meaning": "The set of Candidate MethodUnits awaiting human review.",
+            "Meaning": "The set of extracted methodology records awaiting human review.",
             "How to Interpret": "`pending_review` means the row still needs reviewer judgment.",
         },
         {
-            "Term": "Catalogue Export",
+            "Term": "Export for Catalogue",
             "Meaning": "A downloadable or timestamp-saved CSV package for downstream catalogue work.",
             "How to Interpret": "Export is a handoff artifact, not an automatic catalogue import.",
         },
@@ -1822,10 +1822,10 @@ def interpreting_outputs_page(data: dict[str, pd.DataFrame]) -> None:
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
     st.subheader("Important Reading Rules")
-    st.write("- Candidate MethodUnits are not approved methodologies.")
+    st.write("- Extracted records are not approved methodologies.")
     st.write("- `review_status = pending_review` means human review is still required.")
     st.write("- High confidence means extraction confidence, not business, legal, or carbon-market approval.")
-    st.write("- Supporting documents are preserved as Evidence Links but separated from MethodUnit candidates.")
+    st.write("- Supporting documents are preserved as Supporting Links but separated from extracted methodology records.")
 
 
 def home_page(data: dict[str, pd.DataFrame]) -> None:
@@ -1871,7 +1871,7 @@ def home_page(data: dict[str, pd.DataFrame]) -> None:
 
     left, right = st.columns(2)
     with left:
-        st.subheader("Connector Mix")
+        st.subheader("Source Pattern Mix")
         section_note("Shows the dominant source patterns the ingestion layer must handle.")
         chart = value_counts_df(profiles, "connector_type", "connector_type")
         show_bar_chart(chart, "connector_type", "count", "Connector distribution is unavailable.")
@@ -1941,7 +1941,7 @@ def coverage_dashboard(data: dict[str, pd.DataFrame]) -> None:
         top_programmes = top_programmes.sort_values("methodology_rows", ascending=False).head(15)
 
     chart_specs = [
-        ("Programmes by Connector Type", "connector_type"),
+        ("Programmes by Source Pattern", "connector_type"),
         ("Programmes by Automation Priority", "automation_priority"),
         ("Programmes by Confidence", "confidence"),
     ]
@@ -2007,7 +2007,7 @@ def source_profiles_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def connector_strategy_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Connector Strategy")
+    st.header("Extraction Strategy")
     page_summary(PAGE_SUMMARIES["connectors"])
     if not require_rows(data["connector_strategy"], "connector strategy"):
         return
@@ -2023,14 +2023,14 @@ def connector_strategy_page(data: dict[str, pd.DataFrame]) -> None:
         "maintenance_burden",
         "priority",
     ]
-    st.subheader("Connector Archetypes")
+    st.subheader("Source Archetypes")
     section_note("Each row describes a source pattern and the standards currently assigned to that pattern.")
     show_dataframe(select_existing(strategy, display_columns), "connector_strategy", height=360)
 
-    st.subheader("Programmes per Connector Type")
+    st.subheader("Programmes per Source Pattern")
     profiles = data["source_profiles"]
     chart = value_counts_df(profiles, "connector_type", "connector_type")
-    show_bar_chart(chart, "connector_type", "count", "Connector counts are unavailable.")
+    show_bar_chart(chart, "connector_type", "count", "Source-pattern counts are unavailable.")
 
 
 def extraction_waves_page(data: dict[str, pd.DataFrame]) -> None:
@@ -2251,7 +2251,7 @@ def live_source_check_page(data: dict[str, pd.DataFrame]) -> None:
     connector_options = sorted(
         [value for value in candidates["connector_type"].dropna().unique() if str(value).strip()]
     )
-    selected_connectors = st.multiselect("Connector Type", connector_options, help="Optional filter before selecting programmes.")
+    selected_connectors = st.multiselect("Source Pattern", connector_options, help="Optional filter before selecting programmes.")
     if selected_connectors:
         candidates = candidates[candidates["connector_type"].isin(selected_connectors)]
 
@@ -2325,18 +2325,18 @@ def live_source_check_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Candidate Extraction")
+    st.header("Source-Specific Extraction")
     page_summary(PAGE_SUMMARIES["candidate_extraction"])
     if not require_rows(data["source_profiles"], "source profiles"):
         return
 
     st.write(
-        "This page extracts candidate MethodUnits from selected public source pages. "
+        "This page extracts possible methodology/protocol records from selected public source pages. "
         "The outputs are not automatically approved; they enter a human review queue."
     )
     st.caption(
         "Supported in this prototype: Climate Action Reserve, International Carbon Registry / ICR, "
-        "and Asia Carbon Institute. The extractors fetch only the selected public listing pages and "
+        "and Asia Carbon Institute. These source-specific extractors fetch only the selected public listing pages and "
         "collect candidate links or table rows; linked PDFs are not fetched."
     )
 
@@ -2345,7 +2345,7 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
         return
 
     selected_extractors = st.multiselect(
-        "Supported extractors",
+        "Supported source-specific extractors",
         SUPPORTED_EXTRACTORS,
         default=SUPPORTED_EXTRACTORS,
         help="Only these first three public-source extractors are enabled.",
@@ -2357,7 +2357,7 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
     )
     if allow_insecure_ssl:
         st.warning("Insecure SSL verification disabled for analyst testing. Do not use this for production ingestion.")
-    run_extraction = st.button("Run candidate extraction", type="primary", disabled=not selected_extractors)
+    run_extraction = st.button("Run extraction", type="primary", disabled=not selected_extractors)
 
     if run_extraction:
         with st.spinner("Extracting candidate MethodUnits from selected public source pages..."):
@@ -2386,7 +2386,7 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
         [
             ("Sources attempted", sources_attempted),
             ("Total extracted rows", len(candidates)),
-            ("MethodUnit candidates", methodunit_count),
+            ("Extracted methodology records", methodunit_count),
             ("Supporting documents", supporting_count),
         ]
     )
@@ -2411,11 +2411,11 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
     st.subheader("Quality Summary")
     metric_row(
         [
-            ("Table-derived candidates", count_value(methodunit_rows, "extraction_method", "table_parse")),
-            ("Link-derived candidates", count_value(methodunit_rows, "extraction_method", "link_parse")),
-            ("Candidates missing title", len(missing_title)),
-            ("Candidates missing status", len(missing_status)),
-            ("Candidates needing review", len(needs_review)),
+            ("Table-derived records", count_value(methodunit_rows, "extraction_method", "table_parse")),
+            ("Link-derived records", count_value(methodunit_rows, "extraction_method", "link_parse")),
+            ("Records missing title", len(missing_title)),
+            ("Records missing status", len(missing_status)),
+            ("Records needing review", len(needs_review)),
         ]
     )
     st.caption("ICR detail-page enrichment")
@@ -2462,7 +2462,7 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
 
     st.subheader("Classified Extracted Rows")
     section_note(
-        f"{len(filtered)} rows shown after filters. The default view shows MethodUnit candidates only; include other types to audit supporting links."
+        f"{len(filtered)} rows shown after filters. The default view shows extracted methodology records only; include other types to audit supporting links."
     )
     display_df = select_existing(filtered, CANDIDATE_SCHEMA)
     if display_df.empty:
@@ -2480,7 +2480,7 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
     download_left, download_right = st.columns(2)
     with download_left:
         st.download_button(
-            "Download MethodUnit review CSV",
+            "Download extracted records review CSV",
             data=as_csv_download(select_existing(methodunit_review, CANDIDATE_SCHEMA)),
             file_name="methodunit_candidates_review.csv",
             mime="text/csv",
@@ -2500,7 +2500,7 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
 
 def command_center_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Command Center")
-    page_summary("Operational overview for Source Registry coverage, Connector readiness, Candidate MethodUnits, QA Exceptions, and next actions.")
+    page_summary("Operational overview for Source Registry coverage, extractor readiness, extracted records, issues to resolve, and next actions.")
     profiles = data["source_profiles"]
     if not require_rows(profiles, "source registry"):
         return
@@ -2523,10 +2523,10 @@ def command_center_page(data: dict[str, pd.DataFrame]) -> None:
     )
     metric_row(
         [
-            ("Candidate MethodUnits", len(methodunit_candidates)),
-            ("Evidence Links", len(extracted_links)),
+            ("Extracted Methodology Records", len(methodunit_candidates)),
+            ("Supporting Links", len(extracted_links)),
             ("Extraction errors", len(extraction_errors)),
-            ("QA Exceptions", len(data.get("qa_flags", pd.DataFrame()))),
+            ("Issues to Resolve", len(data.get("qa_flags", pd.DataFrame()))),
         ]
     )
 
@@ -2536,13 +2536,13 @@ def command_center_page(data: dict[str, pd.DataFrame]) -> None:
         chart = value_counts_df(profiles, "populated_source_status", "populated_source_status")
         show_bar_chart(chart, "populated_source_status", "count", "Coverage status is unavailable.")
     with right:
-        st.subheader("Connector Status Summary")
+        st.subheader("Extractor Status Summary")
         chart = value_counts_df(profiles, "connector_type", "connector_type")
-        show_bar_chart(chart, "connector_type", "count", "Connector summary is unavailable.")
+        show_bar_chart(chart, "connector_type", "count", "Extractor summary is unavailable.")
 
     st.subheader("Extraction Candidate Summary")
     if extracted_links.empty:
-        st.info("No current Connector run is loaded. Run connectors or load saved outputs to populate Candidate MethodUnits and Evidence Links.")
+        st.info("No current extraction run is loaded. Extract from Sources or load saved outputs to populate extracted records and Supporting Links.")
     else:
         chart = value_counts_df(extracted_links, "candidate_type", "candidate_type")
         show_bar_chart(chart, "candidate_type", "count", "No candidate type summary is available.")
@@ -2564,9 +2564,9 @@ def command_center_page(data: dict[str, pd.DataFrame]) -> None:
 
 def source_registry_workflow_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Source Registry")
-    page_summary("Operational registry of source locations, Connector strategy, confidence, and review status for each programme.")
+    page_summary("Official source map for each programme, including source URLs, extraction strategy, confidence, and review status.")
     st.info(
-        "Purpose: inspect the official source map before running Connectors. Interpret this as source intelligence, not methodology approval. "
+        "Purpose: inspect the official source map before extracting from sources. Interpret this as source intelligence, not methodology approval. "
         "Action: filter for low confidence, high priority, or unresolved sources and decide what needs checking."
     )
     profiles = data["source_profiles"]
@@ -2609,7 +2609,7 @@ def source_registry_workflow_page(data: dict[str, pd.DataFrame]) -> None:
     st.subheader("Live Source Check Summary")
     checks = st.session_state.get("live_source_check_results", pd.DataFrame())
     if checks.empty:
-        st.info("No live source check results in the current session. Use Run Connectors to perform a pre-check.")
+        st.info("No live source check results in the current session. Use Extract from Sources to perform a pre-check.")
     else:
         chart = value_counts_df(checks, "check_status", "check_status")
         show_bar_chart(chart, "check_status", "count", "Live source check status summary is unavailable.")
@@ -2617,11 +2617,11 @@ def source_registry_workflow_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def run_connectors_workflow_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Run Connectors")
-    page_summary("Run small, controlled Connector checks and candidate extraction for supported public sources.")
+    st.header("Extract from Sources")
+    page_summary("Check official source pages and run source-specific extraction logic for supported public sources.")
     st.info(
-        "Purpose: run bounded source checks and supported Connectors. Interpret outputs as provisional extraction evidence. "
-        "Action: run pre-checks or Candidate Extraction only for the supported sources shown here."
+        "Purpose: check official source pages and run source-specific extraction logic. A source-specific extractor is a small extractor designed for a specific source or source type. "
+        "Interpret outputs as provisional extraction evidence. Action: run pre-checks or extraction only for the supported sources shown here."
     )
     precheck_tab, extraction_tab = st.tabs(["Source Pre-Check", "Candidate Extraction"])
     with precheck_tab:
@@ -2631,10 +2631,11 @@ def run_connectors_workflow_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def candidate_review_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Candidate Review")
-    page_summary("Review Queue for Candidate MethodUnits before Catalogue Export.")
+    st.header("Review Extracted Records")
+    page_summary("Review possible methodology/protocol records before they are exported to a catalogue.")
     st.info(
-        "Purpose: review Candidate MethodUnits. Interpret rows as possible catalogue records that still need human judgment. "
+        "Purpose: check extracted records before catalogue handoff. Extracted records are not automatically approved methodologies. "
+        "Interpret rows as possible methodology/protocol records that still need human judgment. "
         "Action: filter candidates and assign a review decision for display/download."
     )
     session_candidates = current_methodunit_candidates()
@@ -2653,9 +2654,9 @@ def candidate_review_page(data: dict[str, pd.DataFrame]) -> None:
         except Exception as exc:  # noqa: BLE001
             st.error(f"Could not read uploaded CSV: {exc}")
 
-    st.caption(f"Review Queue source: {source_label}")
+    st.caption(f"Review queue source: {source_label}")
     if candidates.empty:
-        st.info("No Candidate MethodUnits are available. Run Connectors, upload a CSV, or place outputs/methodunit_candidates_review.csv in the project.")
+        st.info("No extracted records are available. Extract from Sources, upload a CSV, or place outputs/methodunit_candidates_review.csv in the project.")
         return
 
     if "candidate_type" in candidates.columns:
@@ -2692,10 +2693,11 @@ def candidate_review_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def evidence_links_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Evidence Links")
-    page_summary("Audit trail of extracted Evidence Links, including Candidate MethodUnits, supporting documents, development pages, navigation links, and excluded rows.")
+    st.header("Supporting Links")
+    page_summary("Useful links found during extraction that are preserved separately from extracted methodology records.")
     st.info(
-        "Purpose: inspect the full source-link audit trail. Interpret this page as evidence preservation, not catalogue approval. "
+        "Purpose: preserve useful links found during extraction that are not necessarily methodology records. "
+        "Examples include PDFs, FAQs, templates, guidance pages, development pages, navigation links, and excluded links. "
         "Action: use filters to understand why links were classified or excluded."
     )
     links, source_label = session_or_output(
@@ -2704,9 +2706,9 @@ def evidence_links_page(data: dict[str, pd.DataFrame]) -> None:
         "extracted_source_links_full",
         CANDIDATE_SCHEMA,
     )
-    st.caption(f"Evidence Link source: {source_label}")
+    st.caption(f"Supporting link source: {source_label}")
     if links.empty:
-        st.info("No Evidence Links are available. Run Connectors or place outputs/extracted_source_links_full.csv in the project.")
+        st.info("No Supporting Links are available. Extract from Sources or place outputs/extracted_source_links_full.csv in the project.")
         return
     filtered = inline_filters(
         links,
@@ -2717,11 +2719,11 @@ def evidence_links_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def qa_exceptions_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("QA & Exceptions")
-    page_summary("QA Exceptions from source data, source-access failures, Connector extraction errors, and Review Queue records needing attention.")
+    st.header("Issues to Resolve")
+    page_summary("Broken URLs, SSL problems, stale links, duplicate risks, missing titles, and other review issues.")
     st.info(
-        "Purpose: separate data-quality issues from source-access and extraction failures. Interpret these as blockers or review notes. "
-        "Action: resolve, retry, or document exceptions before Catalogue Export."
+        "Purpose: collect broken URLs, SSL problems, stale links, duplicate risks, missing titles, and other review issues. "
+        "Source-access failures are useful findings, not just app errors. Action: resolve, retry, or document issues before Export for Catalogue."
     )
 
     st.subheader("Data-Quality Issues")
@@ -2747,7 +2749,7 @@ def qa_exceptions_page(data: dict[str, pd.DataFrame]) -> None:
     )
     st.caption(f"Extraction error source: {source_label}")
     if errors.empty:
-        st.info("No Connector extraction errors are available.")
+        st.info("No extraction errors are available.")
     else:
         show_dataframe(errors, "qa_exceptions_extraction_errors", height=240)
 
@@ -2759,16 +2761,17 @@ def qa_exceptions_page(data: dict[str, pd.DataFrame]) -> None:
             | review_needed.get("methodunit_name", pd.Series("", index=review_needed.index)).astype(str).eq("Title requires review")
         ]
     if review_needed.empty:
-        st.info("No current Candidate MethodUnits needing review are loaded.")
+        st.info("No current extracted records needing review are loaded.")
     else:
         show_dataframe(select_existing(review_needed, ["program_name", "methodunit_code", "methodunit_name", "confidence", "review_status", "notes"]), "qa_exceptions_review_needed", height=240)
 
 
 def export_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Catalogue Export")
-    page_summary("Download or save current SourceOps outputs for downstream catalogue review. Files are not overwritten silently.")
+    st.header("Export for Catalogue")
+    page_summary("Download review-ready outputs that could feed a methodology catalogue after human review.")
     st.info(
-        "Purpose: package current SourceOps outputs for downstream catalogue work. Interpret exports as review handoff files. "
+        "Purpose: download review-ready outputs that could feed a methodology catalogue after human review. "
+        "Do not treat all extracted records as already approved. Interpret exports as review handoff files. "
         "Action: download individual CSVs or save timestamped outputs locally."
     )
 
@@ -2779,8 +2782,8 @@ def export_page(data: dict[str, pd.DataFrame]) -> None:
     qa = data.get("qa_flags", pd.DataFrame())
 
     downloads = [
-        ("Current MethodUnit candidates", methodunits, "methodunit_candidates_review.csv"),
-        ("Full Evidence Links", links, "extracted_source_links_full.csv"),
+        ("Current extracted methodology records", methodunits, "methodunit_candidates_review.csv"),
+        ("Full Supporting Links", links, "extracted_source_links_full.csv"),
         ("Extraction errors", errors, "extraction_errors.csv"),
         ("Source Registry table", source_registry, "source_registry.csv"),
         ("QA flags", qa, "qa_flags.csv"),
@@ -2808,13 +2811,13 @@ def export_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def strategy_notes_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Roadmap / Strategy Notes")
-    page_summary("Connector strategy, extraction waves, and methodology rationale behind the SourceOps workflow.")
+    st.header("Roadmap")
+    page_summary("Extraction strategy, extraction waves, and methodology rationale behind the SourceOps workflow.")
     st.info(
-        "Purpose: explain design choices and future roadmap. Interpret this as strategy context for why different sources need different Connectors. "
-        "Action: use it to prioritize the next Connector and explain the workflow to stakeholders."
+        "Purpose: explain design choices and future roadmap. Interpret this as strategy context for why different sources need different extraction approaches. "
+        "Action: use it to prioritize the next source-specific extractor and explain the workflow to stakeholders."
     )
-    connector_tab, waves_tab, methodology_tab = st.tabs(["Connector Strategy", "Extraction Waves", "Methodology Notes"])
+    connector_tab, waves_tab, methodology_tab = st.tabs(["Extraction Strategy", "Extraction Waves", "Methodology Notes"])
     with connector_tab:
         connector_strategy_page(data)
     with waves_tab:
@@ -2823,14 +2826,14 @@ def strategy_notes_page(data: dict[str, pd.DataFrame]) -> None:
         about_page()
         st.subheader("How AI Could Assist Later")
         st.write(
-            "AI can help classify Evidence Links, compare source-page changes, summarize methodology PDFs, "
+            "AI can help classify Supporting Links, compare source-page changes, summarize methodology PDFs, "
             "draft reviewer notes, and suggest duplicate or adopted-external MethodUnit relationships. "
             "Those steps should remain review-assisted until source reliability and audit trails are stronger."
         )
         st.subheader("How This Feeds Dinesh's Methodology Catalogue")
         st.write(
-            "This upstream workbench prepares reviewed Candidate MethodUnits, evidence URLs, source confidence, "
-            "and QA Exceptions so Dinesh's catalogue can ingest cleaner records with traceable provenance."
+            "This upstream workbench prepares reviewed extracted methodology records, evidence URLs, source confidence, "
+            "and issues to resolve so Dinesh's catalogue can ingest cleaner records with traceable provenance."
         )
 
 
@@ -2886,14 +2889,14 @@ def main() -> None:
             "Start Here",
             "Extraction Strategies",
             "Current Capabilities",
-            "Interpreting Outputs",
+            "How to Read the Outputs",
             "Source Registry",
-            "Run Connectors",
-            "Candidate Review",
-            "Evidence Links",
-            "QA & Exceptions",
-            "Export",
-            "Roadmap / Strategy Notes",
+            "Extract from Sources",
+            "Review Extracted Records",
+            "Supporting Links",
+            "Issues to Resolve",
+            "Export for Catalogue",
+            "Roadmap",
         ],
     )
 
@@ -2903,21 +2906,21 @@ def main() -> None:
         extraction_strategies_page(data)
     elif page == "Current Capabilities":
         current_capabilities_page(data)
-    elif page == "Interpreting Outputs":
+    elif page == "How to Read the Outputs":
         interpreting_outputs_page(data)
     elif page == "Source Registry":
         source_registry_workflow_page(data)
-    elif page == "Run Connectors":
+    elif page == "Extract from Sources":
         run_connectors_workflow_page(data)
-    elif page == "Candidate Review":
+    elif page == "Review Extracted Records":
         candidate_review_page(data)
-    elif page == "Evidence Links":
+    elif page == "Supporting Links":
         evidence_links_page(data)
-    elif page == "QA & Exceptions":
+    elif page == "Issues to Resolve":
         qa_exceptions_page(data)
-    elif page == "Export":
+    elif page == "Export for Catalogue":
         export_page(data)
-    elif page == "Roadmap / Strategy Notes":
+    elif page == "Roadmap":
         strategy_notes_page(data)
 
 
