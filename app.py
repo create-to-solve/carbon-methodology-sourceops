@@ -129,6 +129,11 @@ SUPPORTING_DOCUMENT_TERMS = (
     "document",
     "tool",
     "form",
+    "equation",
+    "equations",
+    "data",
+    "worksheet",
+    "workbook",
 )
 DEVELOPMENT_PAGE_TERMS = (
     "development",
@@ -141,6 +146,10 @@ DEVELOPMENT_PAGE_TERMS = (
     "adaptation",
     "issue paper",
     "issue papers",
+    "workgroup",
+    "meeting",
+    "meetings",
+    "revision",
 )
 NAVIGATION_LINK_TERMS = (
     "next",
@@ -746,6 +755,50 @@ def clean_candidate_name(text: str, code: str = "") -> str:
     return normalize_text(name)
 
 
+def looks_like_url(text: str) -> bool:
+    value = normalize_text(text).lower()
+    if value.startswith(("http://", "https://", "www.")):
+        return True
+    return " " not in value and any(marker in value for marker in ["/", "?", "#", "=", "."]) and bool(re.fullmatch(r"[/#?=&.\w:-]+", value))
+
+
+def clean_icr_methodology_title(text: str, code: str = "") -> str:
+    title = clean_candidate_name(text, code)
+    title = re.sub(r"\b(approved methodologies|under development|icr methodologies|methodology development)\b", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\b(approved|active|valid|draft|consultation|under development)\b", "", title, flags=re.IGNORECASE)
+    title = normalize_text(title.strip(" :-|"))
+    if not title or looks_like_url(title) or title.lower() in GENERIC_NAV_TERMS:
+        return ""
+    return title
+
+
+def table_cell_is_metadata(header: str, value: str) -> bool:
+    header_l = header.lower()
+    value_l = normalize_text(value).lower()
+    if not value_l:
+        return True
+    if any(term in header_l for term in ["code", "status", "version", "sector", "category", "date", "link"]):
+        return True
+    if extract_status(value) or extract_version(value) or looks_like_url(value):
+        return True
+    return False
+
+
+def infer_icr_title_from_cells(headers: list[str], cell_texts: list[str], row_text: str, code: str) -> str:
+    for header, value in zip(headers, cell_texts):
+        if any(term in header for term in ["title", "name", "methodology"]):
+            title = clean_icr_methodology_title(value, code)
+            if title:
+                return title
+    for header, value in zip(headers, cell_texts):
+        if not table_cell_is_metadata(header, value):
+            title = clean_icr_methodology_title(value, code)
+            if title and len(title) > 5:
+                return title
+    title = clean_icr_methodology_title(row_text, code)
+    return title
+
+
 def useful_candidate_link(text: str, href: str, source_kind: str) -> bool:
     href = str(href or "").strip()
     if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
@@ -827,10 +880,13 @@ def classify_candidate(candidate: dict, source_kind: str) -> tuple[str, str]:
         return "supporting_document", "Supporting document language detected."
 
     if source_kind == "car":
-        has_protocol_context = extraction_method == "table_parse" or "protocol" in combined_l
         has_protocol_name = any(term in combined_l for term in CAR_METHODUNIT_TERMS)
-        if has_protocol_context and has_protocol_name:
-            return "methodunit_candidate", "Climate Action Reserve protocol listing/name pattern detected."
+        if extraction_method == "table_parse" and has_protocol_name:
+            return "methodunit_candidate", "Climate Action Reserve main protocol table row."
+        if extraction_method == "link_parse" and is_clear_car_protocol_detail_link(name, document_url):
+            return "methodunit_candidate", "Climate Action Reserve protocol detail link detected."
+        if extraction_method == "link_parse" and has_protocol_name:
+            return "supporting_document", "Climate Action Reserve protocol-related support link, not a main table row."
 
     if any(term in name.lower() for term in GENERIC_NAV_TERMS) or len(name) <= 3:
         return "navigation_link", "Generic navigation text."
@@ -838,15 +894,53 @@ def classify_candidate(candidate: dict, source_kind: str) -> tuple[str, str]:
     return "exclude", "No MethodUnit, supporting document, development, or navigation rule matched."
 
 
+def normalized_protocol_key(value: str) -> str:
+    key = normalize_text(value).lower()
+    key = re.sub(r"\b(protocol|version|v\d+(?:\.\d+)*)\b", "", key)
+    key = re.sub(r"[^a-z0-9]+", " ", key)
+    return normalize_text(key)
+
+
+def is_clear_car_protocol_detail_link(name: str, document_url: str) -> bool:
+    name_l = normalize_text(name).lower()
+    url_l = clean_url(document_url).lower()
+    if not name_l or "protocol" not in name_l:
+        return False
+    if any(term in f"{name_l} {url_l}" for term in SUPPORTING_DOCUMENT_TERMS + DEVELOPMENT_PAGE_TERMS):
+        return False
+    return "/protocol" in url_l or "/how/protocols" in url_l
+
+
 def apply_candidate_classification(candidates: list[dict], source_kind: str) -> list[dict]:
     classified = []
     seen_methodunit_keys = set()
+    car_table_urls = {
+        clean_url(candidate.get("document_url", "")).lower()
+        for candidate in candidates
+        if source_kind == "car" and candidate.get("extraction_method") == "table_parse" and candidate.get("document_url")
+    }
+    car_table_names = {
+        normalized_protocol_key(candidate.get("methodunit_name", ""))
+        for candidate in candidates
+        if source_kind == "car" and candidate.get("extraction_method") == "table_parse" and candidate.get("methodunit_name")
+    }
     for candidate in candidates:
         candidate_type, reason = classify_candidate(candidate, source_kind)
         candidate["candidate_type"] = candidate_type
         candidate["classification_reason"] = reason
 
-        if candidate_type == "methodunit_candidate":
+        if (
+            source_kind == "car"
+            and candidate.get("candidate_type") == "methodunit_candidate"
+            and candidate.get("extraction_method") == "link_parse"
+        ):
+            link_url = clean_url(candidate.get("document_url", "")).lower()
+            link_name = normalized_protocol_key(candidate.get("methodunit_name", ""))
+            if link_url in car_table_urls or link_name in car_table_names:
+                candidate["candidate_type"] = "exclude"
+                candidate["classification_reason"] = "Duplicate protocol link already captured from main table."
+
+        if candidate.get("candidate_type") == "methodunit_candidate":
             key = (
                 candidate.get("program_name", "").lower(),
                 candidate.get("methodunit_code", "").lower(),
@@ -924,7 +1018,13 @@ def candidate_from_text_and_link(
     document_url = urljoin(source_url, href) if href else ""
     if not name and not code and not document_url:
         return None
-    if not name and document_url:
+    if source_kind == "icr":
+        name = clean_icr_methodology_title(text, code)
+        if not name and code:
+            name = "Title requires review"
+        elif not name and not code:
+            name = ""
+    elif not name and document_url:
         name = document_url
     status = extract_status(combined)
     version = extract_version(combined)
@@ -932,8 +1032,10 @@ def candidate_from_text_and_link(
         unit_type = "adopted_external_method"
         notes = "Appears to be adopted from CDM."
     confidence = "high" if name and document_url and (code or source_kind == "car") else "medium"
-    if source_kind == "icr" and code and name and status:
+    if source_kind == "icr" and code and name and name != "Title requires review" and status:
         confidence = "high"
+    elif source_kind == "icr" and code:
+        confidence = "medium"
     return make_candidate(
         profile,
         code,
@@ -989,7 +1091,9 @@ def extract_table_candidates(profile: dict, soup, source_url: str, source_kind: 
                     version = value
                 elif "code" in header and not code:
                     code = extract_code(value) or value
-            if not title:
+            if source_kind == "icr":
+                title = infer_icr_title_from_cells(headers, cell_texts, row_text, code)
+            elif not title:
                 title = next((value for value in cell_texts if value and value != code and len(value) > 5), row_text)
             if source_kind == "aci" and CODE_PATTERNS["cdm"].search(row_text):
                 candidate_unit_type = "adopted_external_method"
@@ -997,14 +1101,18 @@ def extract_table_candidates(profile: dict, soup, source_url: str, source_kind: 
             else:
                 candidate_unit_type = unit_type
                 candidate_notes = notes
-            confidence = "high" if clean_candidate_name(title, code) and (row_link or code) else "medium"
-            if source_kind == "icr" and code and title and status:
+            candidate_name = clean_icr_methodology_title(title, code) if source_kind == "icr" else clean_candidate_name(title, code)
+            if source_kind == "icr" and code and not candidate_name:
+                candidate_name = "Title requires review"
+                candidate_notes = "title missing; detail page review required."
+            confidence = "high" if candidate_name and candidate_name != "Title requires review" and (row_link or code) else "medium"
+            if source_kind == "icr" and code and candidate_name and candidate_name != "Title requires review" and status:
                 confidence = "high"
             candidates.append(
                 make_candidate(
                     profile,
                     code,
-                    clean_candidate_name(title, code),
+                    candidate_name,
                     candidate_unit_type,
                     sector,
                     version,
@@ -1026,9 +1134,20 @@ def extract_link_candidates(profile: dict, soup, source_url: str, source_kind: s
         href = anchor.get("href")
         if not should_capture_source_link(text, href, source_kind):
             continue
+        parse_text = text
+        if source_kind == "icr":
+            parent_text = ""
+            for parent_name in ["tr", "li", "p", "div"]:
+                parent = anchor.find_parent(parent_name)
+                candidate_text = normalize_text(parent.get_text(" ", strip=True)) if parent else ""
+                if candidate_text and len(candidate_text) < 500:
+                    parent_text = candidate_text
+                    break
+            if parent_text and CODE_PATTERNS["icr"].search(parent_text):
+                parse_text = parent_text
         candidate = candidate_from_text_and_link(
             profile,
-            text,
+            parse_text,
             href,
             source_url,
             source_kind,
@@ -1734,6 +1853,26 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
             ("Navigation links", navigation_count),
             ("Excluded rows", excluded_count),
             ("Pending review", pending_review),
+        ]
+    )
+    methodunit_rows = candidates[candidates.get("candidate_type", pd.Series("", index=candidates.index)).eq("methodunit_candidate")]
+    missing_title = methodunit_rows[
+        methodunit_rows.get("methodunit_name", pd.Series("", index=methodunit_rows.index)).astype(str).str.strip().isin(["", "Title requires review"])
+    ]
+    missing_status = methodunit_rows[
+        methodunit_rows.get("status", pd.Series("", index=methodunit_rows.index)).astype(str).str.strip().eq("")
+    ]
+    needs_review = methodunit_rows[
+        methodunit_rows.get("review_status", pd.Series("", index=methodunit_rows.index)).astype(str).str.lower().eq("pending_review")
+    ]
+    st.subheader("Quality Summary")
+    metric_row(
+        [
+            ("Table-derived candidates", count_value(methodunit_rows, "extraction_method", "table_parse")),
+            ("Link-derived candidates", count_value(methodunit_rows, "extraction_method", "link_parse")),
+            ("Candidates missing title", len(missing_title)),
+            ("Candidates missing status", len(missing_status)),
+            ("Candidates needing review", len(needs_review)),
         ]
     )
 
