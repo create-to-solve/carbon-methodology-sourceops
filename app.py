@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover - handled in the Streamlit page.
 
 APP_TITLE = "Carbon Methodology SourceOps Workbench"
 DATA_DIR = Path(__file__).parent / "data"
+OUTPUTS_DIR = Path(__file__).parent / "outputs"
 SOURCE_CHECK_MAX_PROGRAMMES = 10
 SOURCE_CHECK_TIMEOUT_SECONDS = 20
 POLITE_USER_AGENT = (
@@ -1517,6 +1518,121 @@ def run_candidate_extractors(
     )
 
 
+def ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    ensured = df.copy()
+    for column in columns:
+        if column not in ensured.columns:
+            ensured[column] = ""
+    return ensured
+
+
+def current_extracted_links() -> pd.DataFrame:
+    return st.session_state.get("candidate_extraction_results", pd.DataFrame(columns=CANDIDATE_SCHEMA)).copy()
+
+
+def current_methodunit_candidates() -> pd.DataFrame:
+    candidates = current_extracted_links()
+    if candidates.empty or "candidate_type" not in candidates.columns:
+        return pd.DataFrame(columns=CANDIDATE_SCHEMA)
+    return candidates[candidates["candidate_type"].eq("methodunit_candidate")].copy()
+
+
+def current_extraction_errors() -> pd.DataFrame:
+    return st.session_state.get("candidate_extraction_errors", pd.DataFrame(columns=EXTRACTION_ERROR_SCHEMA)).copy()
+
+
+def current_live_source_failures() -> pd.DataFrame:
+    checks = st.session_state.get("live_source_check_results", pd.DataFrame())
+    if checks.empty or "check_status" not in checks.columns:
+        return pd.DataFrame()
+    return checks[checks["check_status"].astype(str).str.upper().eq("FAILED")].copy()
+
+
+def load_output_csv(file_name: str, columns: list[str] | None = None) -> pd.DataFrame:
+    path = OUTPUTS_DIR / file_name
+    if not path.exists():
+        return pd.DataFrame(columns=columns or [])
+    try:
+        df = normalize_columns(pd.read_csv(path, dtype=str).fillna(""))
+        return ensure_columns(df, columns) if columns else df
+    except Exception as exc:  # noqa: BLE001 - visible app warning is more useful than failing the page.
+        st.warning(f"Could not load {path}: {exc}")
+        return pd.DataFrame(columns=columns or [])
+
+
+def latest_output_csv(prefix: str, columns: list[str] | None = None) -> pd.DataFrame:
+    if not OUTPUTS_DIR.exists():
+        return pd.DataFrame(columns=columns or [])
+    matches = sorted(OUTPUTS_DIR.glob(f"{prefix}_*.csv"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if not matches:
+        return pd.DataFrame(columns=columns or [])
+    try:
+        df = normalize_columns(pd.read_csv(matches[0], dtype=str).fillna(""))
+        return ensure_columns(df, columns) if columns else df
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Could not load {matches[0]}: {exc}")
+        return pd.DataFrame(columns=columns or [])
+
+
+def session_or_output(
+    session_df: pd.DataFrame,
+    exact_file_name: str,
+    latest_prefix: str,
+    columns: list[str],
+) -> tuple[pd.DataFrame, str]:
+    if not session_df.empty:
+        return ensure_columns(session_df, columns), "current Streamlit session"
+    exact = load_output_csv(exact_file_name, columns)
+    if not exact.empty:
+        return exact, f"outputs/{exact_file_name}"
+    latest = latest_output_csv(latest_prefix, columns)
+    if not latest.empty:
+        return latest, f"latest outputs/{latest_prefix}_*.csv"
+    return pd.DataFrame(columns=columns), "none"
+
+
+def inline_filters(df: pd.DataFrame, filter_columns: list[str], key_prefix: str, defaults: dict[str, list[str]] | None = None) -> pd.DataFrame:
+    filtered = df.copy()
+    if filtered.empty:
+        return filtered
+    columns = st.columns(min(len(filter_columns), 5) or 1)
+    defaults = defaults or {}
+    for index, filter_column in enumerate(filter_columns):
+        if filter_column not in filtered.columns:
+            continue
+        options = sorted([value for value in filtered[filter_column].dropna().unique() if str(value).strip()])
+        with columns[index % len(columns)]:
+            selected = st.multiselect(
+                pretty_label(filter_column),
+                options,
+                default=[value for value in defaults.get(filter_column, []) if value in options],
+                key=f"{key_prefix}_{filter_column}",
+            )
+        if selected:
+            filtered = filtered[filtered[filter_column].isin(selected)]
+    return filtered
+
+
+def save_timestamped_outputs(data: dict[str, pd.DataFrame]) -> list[Path]:
+    OUTPUTS_DIR.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    outputs = {
+        f"methodunit_candidates_review_{timestamp}.csv": current_methodunit_candidates(),
+        f"extracted_source_links_full_{timestamp}.csv": current_extracted_links(),
+        f"extraction_errors_{timestamp}.csv": current_extraction_errors(),
+        f"source_registry_{timestamp}.csv": data.get("source_profiles", pd.DataFrame()),
+        f"qa_flags_{timestamp}.csv": data.get("qa_flags", pd.DataFrame()),
+    }
+    saved_paths = []
+    for file_name, df in outputs.items():
+        if df.empty:
+            continue
+        path = OUTPUTS_DIR / file_name
+        df.to_csv(path, index=False)
+        saved_paths.append(path)
+    return saved_paths
+
+
 def home_page(data: dict[str, pd.DataFrame]) -> None:
     profiles = data["source_profiles"]
 
@@ -2187,6 +2303,314 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
         )
 
 
+def command_center_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Command Center")
+    page_summary("Operational overview for Source Registry coverage, Connector readiness, Candidate MethodUnits, QA Exceptions, and next actions.")
+    profiles = data["source_profiles"]
+    if not require_rows(profiles, "source registry"):
+        return
+
+    methodunit_candidates = current_methodunit_candidates()
+    extracted_links = current_extracted_links()
+    extraction_errors = current_extraction_errors()
+
+    total_programmes = len(profiles)
+    populated = count_value(profiles, "currently_has_methodology_rows", "Yes")
+    unresolved = count_value(profiles, "currently_has_methodology_rows", "No")
+    total_rows = int(numeric_series(profiles, "current_methodology_row_count").sum())
+    metric_row(
+        [
+            ("Source Registry programmes", total_programmes),
+            ("Populated programmes", populated),
+            ("Unresolved programmes", unresolved),
+            ("Current catalogue rows", total_rows),
+        ]
+    )
+    metric_row(
+        [
+            ("Candidate MethodUnits", len(methodunit_candidates)),
+            ("Evidence Links", len(extracted_links)),
+            ("Extraction errors", len(extraction_errors)),
+            ("QA Exceptions", len(data.get("qa_flags", pd.DataFrame()))),
+        ]
+    )
+
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Programme Coverage")
+        chart = value_counts_df(profiles, "populated_source_status", "populated_source_status")
+        show_bar_chart(chart, "populated_source_status", "count", "Coverage status is unavailable.")
+    with right:
+        st.subheader("Connector Status Summary")
+        chart = value_counts_df(profiles, "connector_type", "connector_type")
+        show_bar_chart(chart, "connector_type", "count", "Connector summary is unavailable.")
+
+    st.subheader("Extraction Candidate Summary")
+    if extracted_links.empty:
+        st.info("No current Connector run is loaded. Run connectors or load saved outputs to populate Candidate MethodUnits and Evidence Links.")
+    else:
+        chart = value_counts_df(extracted_links, "candidate_type", "candidate_type")
+        show_bar_chart(chart, "candidate_type", "count", "No candidate type summary is available.")
+
+    st.subheader("Next Recommended Actions")
+    actions = add_profile_context(
+        data["next_actions"],
+        profiles,
+        ["extraction_wave", "automation_priority", "confidence", "connector_type"],
+    )
+    if "priority" not in actions.columns and "automation_priority" in actions.columns:
+        actions["priority"] = actions["automation_priority"]
+    show_dataframe(
+        select_existing(actions, ["priority", "program_name", "extraction_wave", "confidence", "connector_type", "next_action"]).head(20),
+        "command_center_next_actions",
+        height=300,
+    )
+
+
+def source_registry_workflow_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Source Registry")
+    page_summary("Operational registry of source locations, Connector strategy, confidence, and review status for each programme.")
+    profiles = data["source_profiles"]
+    if not require_rows(profiles, "source registry"):
+        return
+
+    filtered = inline_filters(
+        profiles,
+        ["connector_type", "confidence", "automation_priority", "populated_source_status"],
+        "source_registry",
+    )
+    metric_row(
+        [
+            ("Visible programmes", len(filtered)),
+            ("High automation priority", count_contains(filtered, "automation_priority", "High")),
+            ("Manual review required", count_value(filtered, "human_review_required", "Yes")),
+            ("Low confidence", count_contains(filtered, "confidence", "Low")),
+        ]
+    )
+
+    display_columns = [
+        "program_name",
+        "current_methodology_row_count",
+        "official_organization",
+        "official_website",
+        "registry_url",
+        "method_source_url",
+        "connector_type",
+        "extraction_strategy",
+        "automation_priority",
+        "populated_source_status",
+        "confidence",
+        "human_review_required",
+        "evidence_urls",
+        "notes",
+    ]
+    st.subheader("Source Registry Table")
+    show_dataframe(select_existing(filtered, display_columns), "source_registry", height=460)
+
+    st.subheader("Live Source Check Summary")
+    checks = st.session_state.get("live_source_check_results", pd.DataFrame())
+    if checks.empty:
+        st.info("No live source check results in the current session. Use Run Connectors to perform a pre-check.")
+    else:
+        chart = value_counts_df(checks, "check_status", "check_status")
+        show_bar_chart(chart, "check_status", "count", "Live source check status summary is unavailable.")
+        show_dataframe(select_existing(checks, ["checked_at", "program_name", "check_status", "status_code", "source_url", "final_url", "content_type", "likely_link_count", "error"]), "source_registry_live_check_summary", height=260)
+
+
+def run_connectors_workflow_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Run Connectors")
+    page_summary("Run small, controlled Connector checks and candidate extraction for supported public sources.")
+    precheck_tab, extraction_tab = st.tabs(["Source Pre-Check", "Candidate Extraction"])
+    with precheck_tab:
+        live_source_check_page(data)
+    with extraction_tab:
+        candidate_extraction_page(data)
+
+
+def candidate_review_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Candidate Review")
+    page_summary("Review Queue for Candidate MethodUnits before Catalogue Export.")
+    session_candidates = current_methodunit_candidates()
+    candidates, source_label = session_or_output(
+        session_candidates,
+        "methodunit_candidates_review.csv",
+        "methodunit_candidates_review",
+        CANDIDATE_SCHEMA,
+    )
+
+    uploaded = st.file_uploader("Upload Candidate MethodUnit CSV", type=["csv"], key="candidate_review_upload")
+    if uploaded is not None:
+        try:
+            candidates = ensure_columns(normalize_columns(pd.read_csv(uploaded, dtype=str).fillna("")), CANDIDATE_SCHEMA)
+            source_label = "uploaded CSV"
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not read uploaded CSV: {exc}")
+
+    st.caption(f"Review Queue source: {source_label}")
+    if candidates.empty:
+        st.info("No Candidate MethodUnits are available. Run Connectors, upload a CSV, or place outputs/methodunit_candidates_review.csv in the project.")
+        return
+
+    if "candidate_type" in candidates.columns:
+        candidates = candidates[candidates["candidate_type"].eq("methodunit_candidate") | candidates["candidate_type"].eq("")]
+    filtered = inline_filters(
+        candidates,
+        ["program_name", "confidence", "status", "review_status"],
+        "candidate_review",
+    )
+    decision = st.selectbox(
+        "Review decision for displayed rows",
+        ["pending_review", "needs_research", "approved", "rejected"],
+        key="candidate_review_decision",
+        help="This decision is added for display/download only and is not written to disk automatically.",
+    )
+    filtered = filtered.copy()
+    filtered["review_decision"] = decision
+    display_columns = [
+        "program_name",
+        "methodunit_code",
+        "methodunit_name",
+        "unit_type",
+        "sector",
+        "version",
+        "status",
+        "source_url",
+        "document_url",
+        "confidence",
+        "review_status",
+        "review_decision",
+        "notes",
+    ]
+    show_dataframe(select_existing(filtered, display_columns), "candidate_review_queue", height=500)
+
+
+def evidence_links_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Evidence Links")
+    page_summary("Audit trail of extracted Evidence Links, including Candidate MethodUnits, supporting documents, development pages, navigation links, and excluded rows.")
+    links, source_label = session_or_output(
+        current_extracted_links(),
+        "extracted_source_links_full.csv",
+        "extracted_source_links_full",
+        CANDIDATE_SCHEMA,
+    )
+    st.caption(f"Evidence Link source: {source_label}")
+    if links.empty:
+        st.info("No Evidence Links are available. Run Connectors or place outputs/extracted_source_links_full.csv in the project.")
+        return
+    filtered = inline_filters(
+        links,
+        ["candidate_type", "program_name", "unit_type", "confidence", "status", "review_status"],
+        "evidence_links",
+    )
+    show_dataframe(select_existing(filtered, CANDIDATE_SCHEMA), "evidence_links", height=520)
+
+
+def qa_exceptions_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("QA & Exceptions")
+    page_summary("QA Exceptions from source data, source-access failures, Connector extraction errors, and Review Queue records needing attention.")
+
+    st.subheader("Data-Quality Issues")
+    qa = data.get("qa_flags", pd.DataFrame())
+    if qa.empty:
+        st.info("No QA flags are loaded.")
+    else:
+        show_dataframe(qa, "qa_exceptions_data_quality", height=260)
+
+    st.subheader("Source-Access Errors")
+    failures = current_live_source_failures()
+    if failures.empty:
+        st.info("No failed Live Source Check rows in the current session.")
+    else:
+        show_dataframe(select_existing(failures, ["checked_at", "program_name", "source_url", "status_code", "check_status", "error"]), "qa_exceptions_source_access", height=240)
+
+    st.subheader("Extraction Errors")
+    errors, source_label = session_or_output(
+        current_extraction_errors(),
+        "extraction_errors.csv",
+        "extraction_errors",
+        EXTRACTION_ERROR_SCHEMA,
+    )
+    st.caption(f"Extraction error source: {source_label}")
+    if errors.empty:
+        st.info("No Connector extraction errors are available.")
+    else:
+        show_dataframe(errors, "qa_exceptions_extraction_errors", height=240)
+
+    st.subheader("Review-Needed Records")
+    review_needed = current_methodunit_candidates()
+    if not review_needed.empty:
+        review_needed = review_needed[
+            review_needed.get("review_status", pd.Series("", index=review_needed.index)).astype(str).str.lower().eq("pending_review")
+            | review_needed.get("methodunit_name", pd.Series("", index=review_needed.index)).astype(str).eq("Title requires review")
+        ]
+    if review_needed.empty:
+        st.info("No current Candidate MethodUnits needing review are loaded.")
+    else:
+        show_dataframe(select_existing(review_needed, ["program_name", "methodunit_code", "methodunit_name", "confidence", "review_status", "notes"]), "qa_exceptions_review_needed", height=240)
+
+
+def export_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Catalogue Export")
+    page_summary("Download or save current SourceOps outputs for downstream catalogue review. Files are not overwritten silently.")
+
+    methodunits = current_methodunit_candidates()
+    links = current_extracted_links()
+    errors = current_extraction_errors()
+    source_registry = data.get("source_profiles", pd.DataFrame())
+    qa = data.get("qa_flags", pd.DataFrame())
+
+    downloads = [
+        ("Current MethodUnit candidates", methodunits, "methodunit_candidates_review.csv"),
+        ("Full Evidence Links", links, "extracted_source_links_full.csv"),
+        ("Extraction errors", errors, "extraction_errors.csv"),
+        ("Source Registry table", source_registry, "source_registry.csv"),
+        ("QA flags", qa, "qa_flags.csv"),
+    ]
+    for label, df, file_name in downloads:
+        st.download_button(
+            label,
+            data=as_csv_download(df),
+            file_name=file_name,
+            mime="text/csv",
+            key=f"export_{file_name}",
+            disabled=df.empty,
+        )
+
+    st.subheader("Save Timestamped Outputs")
+    st.caption("Writes available current outputs into the local outputs/ folder using timestamped filenames.")
+    if st.button("Save current outputs to outputs/", type="primary"):
+        saved = save_timestamped_outputs(data)
+        if saved:
+            st.success("Saved timestamped output files:")
+            for path in saved:
+                st.write(str(path))
+        else:
+            st.warning("No non-empty outputs were available to save.")
+
+
+def strategy_notes_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Strategy Notes")
+    page_summary("Connector strategy, extraction waves, and methodology rationale behind the SourceOps workflow.")
+    connector_tab, waves_tab, methodology_tab = st.tabs(["Connector Strategy", "Extraction Waves", "Methodology Notes"])
+    with connector_tab:
+        connector_strategy_page(data)
+    with waves_tab:
+        extraction_waves_page(data)
+    with methodology_tab:
+        about_page()
+        st.subheader("How AI Could Assist Later")
+        st.write(
+            "AI can help classify Evidence Links, compare source-page changes, summarize methodology PDFs, "
+            "draft reviewer notes, and suggest duplicate or adopted-external MethodUnit relationships. "
+            "Those steps should remain review-assisted until source reliability and audit trails are stronger."
+        )
+        st.subheader("How This Feeds Dinesh's Methodology Catalogue")
+        st.write(
+            "This upstream workbench prepares reviewed Candidate MethodUnits, evidence URLs, source confidence, "
+            "and QA Exceptions so Dinesh's catalogue can ingest cleaner records with traceable provenance."
+        )
+
+
 def about_page() -> None:
     st.header("About / Methodology")
     page_summary(PAGE_SUMMARIES["about"])
@@ -2236,39 +2660,33 @@ def main() -> None:
     page = st.sidebar.radio(
         "Pages",
         [
-            "Home / Executive Summary",
-            "Coverage Dashboard",
-            "Source Profiles",
-            "Connector Strategy",
-            "Extraction Waves",
-            "QA Flags",
-            "Next Actions",
-            "Live Source Check",
-            "Candidate Extraction",
-            "About / Methodology",
+            "Command Center",
+            "Source Registry",
+            "Run Connectors",
+            "Candidate Review",
+            "Evidence Links",
+            "QA & Exceptions",
+            "Export",
+            "Strategy Notes",
         ],
     )
 
-    if page == "Home / Executive Summary":
-        home_page(data)
-    elif page == "Coverage Dashboard":
-        coverage_dashboard(data)
-    elif page == "Source Profiles":
-        source_profiles_page(data)
-    elif page == "Connector Strategy":
-        connector_strategy_page(data)
-    elif page == "Extraction Waves":
-        extraction_waves_page(data)
-    elif page == "QA Flags":
-        qa_flags_page(data)
-    elif page == "Next Actions":
-        next_actions_page(data)
-    elif page == "Live Source Check":
-        live_source_check_page(data)
-    elif page == "Candidate Extraction":
-        candidate_extraction_page(data)
-    elif page == "About / Methodology":
-        about_page()
+    if page == "Command Center":
+        command_center_page(data)
+    elif page == "Source Registry":
+        source_registry_workflow_page(data)
+    elif page == "Run Connectors":
+        run_connectors_workflow_page(data)
+    elif page == "Candidate Review":
+        candidate_review_page(data)
+    elif page == "Evidence Links":
+        evidence_links_page(data)
+    elif page == "QA & Exceptions":
+        qa_exceptions_page(data)
+    elif page == "Export":
+        export_page(data)
+    elif page == "Strategy Notes":
+        strategy_notes_page(data)
 
 
 if __name__ == "__main__":

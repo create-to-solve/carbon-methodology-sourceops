@@ -1,32 +1,36 @@
 # Carbon Methodology SourceOps Workbench
 
-`Carbon Methodology SourceOps Workbench` is a lightweight Streamlit prototype for exploring the upstream source-intelligence layer behind a carbon-market methodology catalogue.
+`Carbon Methodology SourceOps Workbench` is a local Streamlit prototype for running an upstream SourceOps workflow behind a carbon-market methodology catalogue.
 
-The existing methodology catalogue answers:
+The app is organized around this operating flow:
 
-> What methodologies do we currently have?
+```text
+Source Registry
+-> Run Connectors
+-> Candidate MethodUnits
+-> Evidence Links
+-> QA / Exceptions
+-> Export to Catalogue
+-> Strategy Notes
+```
 
-This workbench answers:
-
-> Where does methodology information come from, how should it be extracted, how confident are we, and what needs review?
-
-The app does not scrape at scale, does not call external APIs, and does not modify the source CSV files. It reads the cleaned local CSV files already present in the `data/` folder. The optional **Live Source Check** page performs only small, user-triggered reachability checks against selected source pages.
+It reads the cleaned local CSV files in `data/`, runs only small user-triggered checks or supported connectors, and keeps extracted outputs in the Streamlit session until downloaded or explicitly saved to `outputs/`.
 
 ## How to Run
 
-Install the minimal dependencies:
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Start the local Streamlit app:
+Start the app:
 
 ```bash
 streamlit run app.py
 ```
 
-## Expected CSV Files
+## Expected Input CSV Files
 
 The app expects these files under `data/`:
 
@@ -36,83 +40,75 @@ The app expects these files under `data/`:
 - `qa_flags_fixed.csv`
 - `next_actions_fixed.csv`
 
-CSV headers are normalized defensively at load time by stripping whitespace, lower-casing, and replacing spaces with underscores. Optional columns are handled gracefully when missing.
+CSV headers are normalized defensively at load time. Source CSV values are not changed.
 
-## Main Pages
+## Workflow Pages
 
-- **Home / Executive Summary**: Programme-level totals, methodology row coverage, connector and wave distributions, high-priority automation candidates, and manual-review or low-confidence cases.
-- **Coverage Dashboard**: Coverage metrics and charts from `source_profiles_final_fixed.csv`.
-- **Source Profiles**: Filterable source profile table with key source, connector, strategy, confidence, evidence, and notes fields.
-- **Connector Strategy**: Connector archetypes, associated standards, extraction methods, reusability, maintenance burden, and priority.
-- **Extraction Waves**: Wave distribution and enriched wave views joined to source profile context.
-- **QA Flags**: QA issue table with highlighted classes such as duplicates, ambiguous standards, adopted external methods, evidence URL issues, and low-confidence sources.
-- **Next Actions**: Filterable action queue for deciding what to do next by programme, priority, wave, and confidence.
-- **Live Source Check**: Small-batch source reconnaissance for selected programmes. It fetches the selected `method_source_url` with a polite user-agent, follows redirects, records status, final URL, content type, response size, title, link counts, likely methodology/protocol/document links, and an HTML content hash for future change detection. It does not fetch linked PDFs or ingest methodologies.
-- **Candidate Extraction**: Controlled candidate MethodUnit extraction for the first supported public sources. It produces a review-ready table using the standard candidate schema but does not write results to disk unless the user downloads them.
-- **About / Methodology**: Explanation of MethodUnits, terminology differences, connector strategy, and how SourceOps feeds the methodology catalogue.
+- **Command Center**: Executive operating view with Source Registry coverage, populated versus unresolved programmes, Connector status summary, current Candidate MethodUnit and Evidence Link counts, QA Exceptions, and next recommended actions.
+- **Source Registry**: Filterable source registry from `source_profiles_final_fixed.csv`, including source URLs, Connector type, confidence, automation priority, populated status, and any live source-check summary from the current session.
+- **Run Connectors**: Operational workspace for live source pre-checks and Candidate Extraction. Current supported connectors are Climate Action Reserve, International Carbon Registry / ICR, and Asia Carbon Institute.
+- **Candidate Review**: Review Queue for Candidate MethodUnits. Uses current session candidates, `outputs/methodunit_candidates_review.csv`, latest timestamped output, or an uploaded CSV. Review decisions are added for display/download only and are not persisted automatically.
+- **Evidence Links**: Full extracted Evidence Link audit table, including `methodunit_candidate`, `supporting_document`, `development_page`, `navigation_link`, and `exclude` rows.
+- **QA & Exceptions**: Separates data-quality issues, source-access failures, Connector extraction errors, and review-needed Candidate MethodUnits.
+- **Export**: Downloads current MethodUnit candidates, full Evidence Links, extraction errors, Source Registry, and QA flags. Also supports saving available current outputs into `outputs/` with timestamped filenames.
+- **Strategy Notes**: Connector strategy, extraction waves, and methodology rationale, including why one scraper will not work and how this upstream workbench feeds Dinesh's methodology catalogue.
 
-## Candidate Extraction
+## Supported Connectors
 
-The **Candidate Extraction** page demonstrates the next step after source checking: acquiring usable methodology/protocol metadata from selected public source pages.
+The prototype currently supports controlled Candidate Extraction for:
 
-Supported first extractors:
+- **Climate Action Reserve**: public protocols page.
+- **International Carbon Registry / ICR**: public methodology catalogue/detail pages discovered from the index.
+- **Asia Carbon Institute**: public methodologies page, including ACI-native methods and adopted CDM methods when visible.
 
-- **Climate Action Reserve**: Extracts candidate protocol records from the public protocols page.
-- **International Carbon Registry / ICR**: Extracts candidate methodology records from the public ICR methodology catalogue/documentation page.
-- **Asia Carbon Institute**: Extracts candidate methodology records from the public methodologies page, including ACI-native methods and CDM-derived adopted external methods where visible.
+Connectors use `requests` with a polite user-agent and `BeautifulSoup` parsing. They do not fetch linked PDFs, create accounts, bypass access controls, or scrape at scale.
 
-Candidate rows use this schema:
+## Candidate MethodUnits and Evidence Links
 
-- `program_id`
-- `program_name`
+Candidate rows include:
+
+- `candidate_type`
+- `classification_reason`
 - `methodunit_code`
 - `methodunit_name`
 - `unit_type`
-- `candidate_type`
-- `classification_reason`
-- `sector`
-- `version`
-- `status`
 - `source_url`
 - `document_url`
-- `extraction_method`
 - `confidence`
 - `review_status`
-- `extracted_at`
 - `notes`
 
-The `candidate_type` field separates likely catalogue records from useful supporting links:
+`candidate_type` separates likely catalogue records from supporting links:
 
-- `methodunit_candidate`: likely methodology, protocol, or adopted external method record.
-- `supporting_document`: FAQ, template, guidance, manual, procedure, tool, form, or other support material.
-- `development_page`: consultation, under-development, concept, adaptation, or issue-paper page.
-- `navigation_link`: page section, generic listing, pagination, or catalogue navigation link.
-- `exclude`: empty, duplicate, social/footer, unrelated, or otherwise non-useful row.
+- `methodunit_candidate`
+- `supporting_document`
+- `development_page`
+- `navigation_link`
+- `exclude`
 
-The MethodUnit review download, `methodunit_candidates_review.csv`, includes only `methodunit_candidate` rows. The full audit download, `extracted_source_links_full.csv`, includes all classified rows so useful supporting links are not lost.
+All Candidate MethodUnits remain `pending_review` until a human reviewer approves, rejects, or marks them as needing research.
 
-All extracted MethodUnit rows are marked `pending_review` because this prototype uses lightweight heuristics over public HTML tables, links, and headings. A reviewer should confirm names, codes, versions, statuses, sectors, document URLs, and classifications before importing any candidate into the methodology catalogue.
+## Outputs
 
-Current limitations:
+The Export page can write timestamped files to `outputs/`, such as:
 
-- Only three extractors are enabled.
-- Linked PDFs and detail pages are listed but not fetched.
-- JavaScript-heavy catalogues are intentionally excluded.
-- The parser favors robust tables and obvious methodology/protocol/document links, so it may miss records hidden behind scripts or non-standard markup.
-- Results are stored only in the Streamlit session until downloaded.
+- `methodunit_candidates_review_YYYYMMDD_HHMMSS.csv`
+- `extracted_source_links_full_YYYYMMDD_HHMMSS.csv`
+- `extraction_errors_YYYYMMDD_HHMMSS.csv`
+- `source_registry_YYYYMMDD_HHMMSS.csv`
+- `qa_flags_YYYYMMDD_HHMMSS.csv`
 
-SSL handling:
+The app also looks for non-timestamped files such as `outputs/methodunit_candidates_review.csv` and `outputs/extracted_source_links_full.csv` when loading saved review data.
 
-- SSL verification remains enabled by default.
-- If Asia Carbon Institute or another source fails with certificate verification errors, the app records the failure in the extraction errors table and suggests manual browser review or retrying later.
-- Analysts may temporarily enable **Allow insecure SSL for analyst testing** for the selected run. This uses insecure SSL verification only for that run and should not be used for production ingestion.
+## Current Limitations
 
-Future extensions could add source-specific detail-page parsers, PDF metadata extraction, change detection from content hashes, reviewer approval workflows, and controlled connectors for additional standards.
+- Only three Candidate Extraction connectors are implemented.
+- No linked PDFs are fetched.
+- JavaScript-heavy, login-gated, DocSend-gated, paywalled, or CAPTCHA-protected sources are out of scope.
+- Classification is rule-based and requires human review.
+- There is no database or persistent review-state system.
+- The app does not call external APIs.
 
-## Prototype Scope
+## Future Extensions
 
-This is a local prototype for source intelligence and ingestion planning. It is not yet a crawler, connector runner, or production data pipeline.
-
-The live source check is deliberately limited to small, manual runs. It must not be used to bypass logins, paywalls, CAPTCHAs, DocSend gates, or other access controls.
-
-Candidate extraction follows the same rule: it is for small, manual public-source checks only, not broad scraping.
+Useful next steps include adding the next stable HTML catalogue Connector, detail-page enrichment for more standards, PDF metadata extraction, reviewer state persistence, and catalogue import validation.
