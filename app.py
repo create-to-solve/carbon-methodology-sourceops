@@ -1633,6 +1633,201 @@ def save_timestamped_outputs(data: dict[str, pd.DataFrame]) -> list[Path]:
     return saved_paths
 
 
+def start_here_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Start Here")
+    page_summary("Use this page first. It explains the problem, the SourceOps role, the operating pipeline, and what the prototype proves today.")
+
+    profiles = data.get("source_profiles", pd.DataFrame())
+    total_programmes = len(profiles)
+
+    st.subheader("The Problem")
+    st.write(
+        "Carbon methodology information is scattered across heterogeneous official sources. "
+        "Some programmes publish structured protocol tables, some use documentation portals, some rely on PDFs, "
+        "some adopt external methods, and some have no clear public methodology page."
+    )
+
+    st.subheader("The Role of This App")
+    st.write(
+        "This is an upstream SourceOps layer for methodology catalogues. It does not replace the catalogue. "
+        "It organizes source locations, runs bounded Connector checks, extracts Candidate MethodUnits, preserves Evidence Links, "
+        "surfaces QA Exceptions, and prepares reviewed outputs for Catalogue Export."
+    )
+
+    st.subheader("Pipeline")
+    st.write(
+        "Source Registry -> Live Source Check -> Connector Extraction -> Candidate MethodUnits -> "
+        "Evidence Links -> QA Exceptions -> Review -> Catalogue Export"
+    )
+
+    st.subheader("What This Prototype Proves")
+    st.write(
+        "The app can load a 61-programme Source Registry, check selected public source URLs, run three controlled Connectors, "
+        "separate Candidate MethodUnits from supporting links, log source-access exceptions, and export review-ready CSVs."
+    )
+
+    st.subheader("What It Does Not Yet Do")
+    st.write(
+        "It does not approve methodologies, fetch linked PDFs, scrape at scale, bypass access controls, create accounts, "
+        "persist reviewer decisions in a database, or cover every standard."
+    )
+
+    st.subheader("Current Capability Snapshot")
+    capability_rows = [
+        {"Capability": "Source Registry", "Current State": f"{total_programmes or 61} programmes loaded"},
+        {"Capability": "Live Source Check", "Current State": "working"},
+        {"Capability": "Climate Action Reserve connector", "Current State": "working structured-table extraction"},
+        {"Capability": "ICR connector", "Current State": "discovery-only / pending review"},
+        {"Capability": "Asia Carbon Institute", "Current State": "source-access issue due to SSL"},
+        {"Capability": "Candidate Review", "Current State": "prototype"},
+        {"Capability": "Export", "Current State": "working"},
+        {"Capability": "Persistent database", "Current State": "not yet"},
+    ]
+    st.dataframe(pd.DataFrame(capability_rows), hide_index=True, use_container_width=True)
+
+    st.subheader("How to Read the Rest of the App")
+    st.write(
+        "Start with Extraction Strategies and Current Capabilities for context. Then inspect Source Registry, run Connectors, "
+        "review Candidate MethodUnits, audit Evidence Links, resolve QA Exceptions, and export only reviewed records."
+    )
+
+
+def extraction_strategies_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Extraction Strategies")
+    page_summary("Use this page to understand why SourceOps needs multiple Connector patterns instead of one generic scraper.")
+    st.write(
+        "One generic scraper is not enough because carbon standards publish methodology information through very different source patterns. "
+        "A reliable workflow needs source-specific Connectors, bounded extraction rules, and human review."
+    )
+
+    rows = [
+        {
+            "Source Archetype": "Structured HTML table",
+            "Example Sources": "Climate Action Reserve",
+            "Extraction Strategy": "Parse the official table, preserve source/detail links, classify rows as Candidate MethodUnits.",
+            "Current Status": "Implemented for CAR",
+            "Role of AI": "Assist review and duplicate detection, not blind scraping.",
+        },
+        {
+            "Source Archetype": "Methodology catalogue with detail pages",
+            "Example Sources": "International Carbon Registry / ICR",
+            "Extraction Strategy": "Discover methodology codes and detail URLs, then enrich cautiously from detail-page text.",
+            "Current Status": "Discovery-only / pending title review",
+            "Role of AI": "Help summarize detail pages after bounded retrieval.",
+        },
+        {
+            "Source Archetype": "PDF / document family",
+            "Example Sources": "ART/TREES, C-Capsule",
+            "Extraction Strategy": "List official documents, then extract metadata from PDFs only in a later controlled workflow.",
+            "Current Status": "Strategy only",
+            "Role of AI": "Assist document metadata extraction with citations.",
+        },
+        {
+            "Source Archetype": "Adopted external methods",
+            "Example Sources": "Asia Carbon Institute, Social Carbon",
+            "Extraction Strategy": "Detect native methods separately from adopted CDM/external MethodUnits.",
+            "Current Status": "Partially implemented for ACI, currently blocked by source access/SSL in some runs",
+            "Role of AI": "Help reconcile adopted method references to canonical source records.",
+        },
+        {
+            "Source Archetype": "JS-heavy portal",
+            "Example Sources": "Verra, Gold Standard, Isometric, Riverse",
+            "Extraction Strategy": "Use explicit connector/API/network analysis later; do not treat as simple HTML scraping.",
+            "Current Status": "Not implemented",
+            "Role of AI": "Assist mapping fields once official access pattern is understood.",
+        },
+        {
+            "Source Archetype": "No clear methodology page",
+            "Example Sources": "Small or unresolved programmes",
+            "Extraction Strategy": "Manual source profile, monitoring, and QA Exception tracking.",
+            "Current Status": "Represented in Source Registry and QA Exceptions",
+            "Role of AI": "Assist source triage and reviewer notes.",
+        },
+    ]
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.info(
+        "AI should assist bounded extraction and review. It should not blindly crawl the web, infer approval status, "
+        "or bypass official source controls."
+    )
+
+
+def current_capabilities_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Current Capabilities")
+    page_summary("Use this page to see what the prototype can do today and where the Connector roadmap still has gaps.")
+
+    capabilities = [
+        "Check whether selected source URLs are reachable.",
+        "Extract Climate Action Reserve protocol table candidates.",
+        "Discover ICR M-ICR methodology codes and detail URLs.",
+        "Log Asia Carbon Institute SSL/source-access failure as a QA Exception.",
+        "Classify Evidence Links into methodunit_candidate, supporting_document, development_page, navigation_link, and exclude.",
+        "Export Candidate MethodUnits, Evidence Links, QA flags, Source Registry records, and extraction errors.",
+    ]
+    for item in capabilities:
+        st.write(f"- {item}")
+
+    st.subheader("Connector Status")
+    connector_rows = [
+        {"Connector": "CAR", "Status": "working connector", "Interpretation": "Structured protocol table extraction is working."},
+        {"Connector": "ICR", "Status": "discovery-only / needs title review", "Interpretation": "M-ICR codes and detail URLs are discovered, but titles require cautious review."},
+        {"Connector": "ACI", "Status": "blocked/source exception", "Interpretation": "Public source may fail SSL verification; error is logged instead of bypassed by default."},
+        {"Connector": "CFC", "Status": "reachable but not yet implemented", "Interpretation": "Good candidate for a later small-standard connector."},
+        {"Connector": "ACR", "Status": "stale URL to repair before connector", "Interpretation": "Fix Source Registry URL before building connector."},
+        {"Connector": "CDM", "Status": "reachable/review", "Interpretation": "Large source; needs careful scoped connector design."},
+    ]
+    st.dataframe(pd.DataFrame(connector_rows), hide_index=True, use_container_width=True)
+
+    st.subheader("Current Session Counts")
+    metric_row(
+        [
+            ("Candidate MethodUnits", len(current_methodunit_candidates())),
+            ("Evidence Links", len(current_extracted_links())),
+            ("Extraction errors", len(current_extraction_errors())),
+            ("Live source failures", len(current_live_source_failures())),
+        ]
+    )
+
+
+def interpreting_outputs_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Interpreting Outputs")
+    page_summary("Use this page before reviewing exported CSVs. It explains what each SourceOps output means and what it does not mean.")
+
+    rows = [
+        {
+            "Term": "Candidate MethodUnit",
+            "Meaning": "A possible methodology, protocol, module, or adopted external method extracted from an official source.",
+            "How to Interpret": "It is not approved for catalogue ingestion until reviewed.",
+        },
+        {
+            "Term": "Evidence Link",
+            "Meaning": "A source URL captured during Connector extraction, including candidates, supporting documents, development pages, navigation links, and excluded rows.",
+            "How to Interpret": "Useful links are preserved even when separated from Candidate MethodUnits.",
+        },
+        {
+            "Term": "QA Exception",
+            "Meaning": "A data-quality issue, source-access failure, extraction error, or review-needed record.",
+            "How to Interpret": "Resolve or document before Catalogue Export when material.",
+        },
+        {
+            "Term": "Review Queue",
+            "Meaning": "The set of Candidate MethodUnits awaiting human review.",
+            "How to Interpret": "`pending_review` means the row still needs reviewer judgment.",
+        },
+        {
+            "Term": "Catalogue Export",
+            "Meaning": "A downloadable or timestamp-saved CSV package for downstream catalogue work.",
+            "How to Interpret": "Export is a handoff artifact, not an automatic catalogue import.",
+        },
+    ]
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    st.subheader("Important Reading Rules")
+    st.write("- Candidate MethodUnits are not approved methodologies.")
+    st.write("- `review_status = pending_review` means human review is still required.")
+    st.write("- High confidence means extraction confidence, not business, legal, or carbon-market approval.")
+    st.write("- Supporting documents are preserved as Evidence Links but separated from MethodUnit candidates.")
+
+
 def home_page(data: dict[str, pd.DataFrame]) -> None:
     profiles = data["source_profiles"]
 
@@ -2370,6 +2565,10 @@ def command_center_page(data: dict[str, pd.DataFrame]) -> None:
 def source_registry_workflow_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Source Registry")
     page_summary("Operational registry of source locations, Connector strategy, confidence, and review status for each programme.")
+    st.info(
+        "Purpose: inspect the official source map before running Connectors. Interpret this as source intelligence, not methodology approval. "
+        "Action: filter for low confidence, high priority, or unresolved sources and decide what needs checking."
+    )
     profiles = data["source_profiles"]
     if not require_rows(profiles, "source registry"):
         return
@@ -2420,6 +2619,10 @@ def source_registry_workflow_page(data: dict[str, pd.DataFrame]) -> None:
 def run_connectors_workflow_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Run Connectors")
     page_summary("Run small, controlled Connector checks and candidate extraction for supported public sources.")
+    st.info(
+        "Purpose: run bounded source checks and supported Connectors. Interpret outputs as provisional extraction evidence. "
+        "Action: run pre-checks or Candidate Extraction only for the supported sources shown here."
+    )
     precheck_tab, extraction_tab = st.tabs(["Source Pre-Check", "Candidate Extraction"])
     with precheck_tab:
         live_source_check_page(data)
@@ -2430,6 +2633,10 @@ def run_connectors_workflow_page(data: dict[str, pd.DataFrame]) -> None:
 def candidate_review_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Candidate Review")
     page_summary("Review Queue for Candidate MethodUnits before Catalogue Export.")
+    st.info(
+        "Purpose: review Candidate MethodUnits. Interpret rows as possible catalogue records that still need human judgment. "
+        "Action: filter candidates and assign a review decision for display/download."
+    )
     session_candidates = current_methodunit_candidates()
     candidates, source_label = session_or_output(
         session_candidates,
@@ -2487,6 +2694,10 @@ def candidate_review_page(data: dict[str, pd.DataFrame]) -> None:
 def evidence_links_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Evidence Links")
     page_summary("Audit trail of extracted Evidence Links, including Candidate MethodUnits, supporting documents, development pages, navigation links, and excluded rows.")
+    st.info(
+        "Purpose: inspect the full source-link audit trail. Interpret this page as evidence preservation, not catalogue approval. "
+        "Action: use filters to understand why links were classified or excluded."
+    )
     links, source_label = session_or_output(
         current_extracted_links(),
         "extracted_source_links_full.csv",
@@ -2508,6 +2719,10 @@ def evidence_links_page(data: dict[str, pd.DataFrame]) -> None:
 def qa_exceptions_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("QA & Exceptions")
     page_summary("QA Exceptions from source data, source-access failures, Connector extraction errors, and Review Queue records needing attention.")
+    st.info(
+        "Purpose: separate data-quality issues from source-access and extraction failures. Interpret these as blockers or review notes. "
+        "Action: resolve, retry, or document exceptions before Catalogue Export."
+    )
 
     st.subheader("Data-Quality Issues")
     qa = data.get("qa_flags", pd.DataFrame())
@@ -2552,6 +2767,10 @@ def qa_exceptions_page(data: dict[str, pd.DataFrame]) -> None:
 def export_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Catalogue Export")
     page_summary("Download or save current SourceOps outputs for downstream catalogue review. Files are not overwritten silently.")
+    st.info(
+        "Purpose: package current SourceOps outputs for downstream catalogue work. Interpret exports as review handoff files. "
+        "Action: download individual CSVs or save timestamped outputs locally."
+    )
 
     methodunits = current_methodunit_candidates()
     links = current_extracted_links()
@@ -2589,8 +2808,12 @@ def export_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def strategy_notes_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Strategy Notes")
+    st.header("Roadmap / Strategy Notes")
     page_summary("Connector strategy, extraction waves, and methodology rationale behind the SourceOps workflow.")
+    st.info(
+        "Purpose: explain design choices and future roadmap. Interpret this as strategy context for why different sources need different Connectors. "
+        "Action: use it to prioritize the next Connector and explain the workflow to stakeholders."
+    )
     connector_tab, waves_tab, methodology_tab = st.tabs(["Connector Strategy", "Extraction Waves", "Methodology Notes"])
     with connector_tab:
         connector_strategy_page(data)
@@ -2660,19 +2883,28 @@ def main() -> None:
     page = st.sidebar.radio(
         "Pages",
         [
-            "Command Center",
+            "Start Here",
+            "Extraction Strategies",
+            "Current Capabilities",
+            "Interpreting Outputs",
             "Source Registry",
             "Run Connectors",
             "Candidate Review",
             "Evidence Links",
             "QA & Exceptions",
             "Export",
-            "Strategy Notes",
+            "Roadmap / Strategy Notes",
         ],
     )
 
-    if page == "Command Center":
-        command_center_page(data)
+    if page == "Start Here":
+        start_here_page(data)
+    elif page == "Extraction Strategies":
+        extraction_strategies_page(data)
+    elif page == "Current Capabilities":
+        current_capabilities_page(data)
+    elif page == "Interpreting Outputs":
+        interpreting_outputs_page(data)
     elif page == "Source Registry":
         source_registry_workflow_page(data)
     elif page == "Run Connectors":
@@ -2685,7 +2917,7 @@ def main() -> None:
         qa_exceptions_page(data)
     elif page == "Export":
         export_page(data)
-    elif page == "Strategy Notes":
+    elif page == "Roadmap / Strategy Notes":
         strategy_notes_page(data)
 
 
