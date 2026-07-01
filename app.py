@@ -764,12 +764,162 @@ def looks_like_url(text: str) -> bool:
 
 def clean_icr_methodology_title(text: str, code: str = "") -> str:
     title = clean_candidate_name(text, code)
-    title = re.sub(r"\b(approved methodologies|under development|icr methodologies|methodology development)\b", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\b(approved methodologies|approved icr methodologies|under development|icr methodologies|methodology development)\b", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\b(previous|next|international carbon registry|documentation|icr program)\b", "", title, flags=re.IGNORECASE)
     title = re.sub(r"\b(approved|active|valid|draft|consultation|under development)\b", "", title, flags=re.IGNORECASE)
     title = normalize_text(title.strip(" :-|"))
     if not title or looks_like_url(title) or title.lower() in GENERIC_NAV_TERMS:
         return ""
     return title
+
+
+def is_pdf_or_document_url(url: str) -> bool:
+    parsed_path = urlparse(clean_url(url)).path.lower()
+    return parsed_path.endswith((".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"))
+
+
+def title_from_icr_detail_page(response_text: str, code: str) -> tuple[str, str]:
+    soup = BeautifulSoup(response_text, "html.parser")
+    code_pattern = re.compile(re.escape(code).replace(r"\ ", r"\s*").replace(r"\-", r"[-\s]?"), re.IGNORECASE)
+
+    h1 = soup.find("h1")
+    if h1:
+        title = clean_icr_methodology_title(h1.get_text(" ", strip=True), code)
+        if title:
+            return title, "detail page h1"
+
+    page_title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    title = clean_icr_methodology_title(page_title, code)
+    if title:
+        return title, "detail page title"
+
+    for heading in soup.find_all(["h2", "h3"]):
+        heading_text = normalize_text(heading.get_text(" ", strip=True))
+        sibling_text = ""
+        for sibling in heading.find_next_siblings(limit=3):
+            sibling_text = normalize_text(f"{sibling_text} {sibling.get_text(' ', strip=True)}")
+        context = normalize_text(f"{heading_text} {sibling_text}")
+        if code_pattern.search(context):
+            title = clean_icr_methodology_title(heading_text, code) or clean_icr_methodology_title(context, code)
+            if title:
+                return title, "detail page heading near code"
+
+    visible_lines = [
+        normalize_text(line)
+        for line in soup.get_text("\n", strip=True).splitlines()
+        if normalize_text(line)
+    ]
+    for line in visible_lines:
+        if code_pattern.search(line):
+            title = clean_icr_methodology_title(line, code)
+            if title:
+                return title, "detail page text line containing code"
+
+    return "", ""
+
+
+def fetch_icr_detail_title(document_url: str, code: str, allow_insecure_ssl: bool) -> tuple[str, str, dict | None, bool]:
+    url = clean_url(document_url)
+    if not is_fetchable_url(url):
+        return "", "", make_extraction_error(
+            "International Carbon Registry / ICR",
+            url,
+            "invalid_detail_url",
+            "ICR detail URL is missing or is not an HTTP/HTTPS URL.",
+            "Review the index-page candidate manually.",
+        ), False
+    if is_pdf_or_document_url(url):
+        return "", "", None, False
+    try:
+        response = requests.get(
+            url,
+            headers={"User-Agent": POLITE_USER_AGENT},
+            allow_redirects=True,
+            timeout=SOURCE_CHECK_TIMEOUT_SECONDS,
+            verify=not allow_insecure_ssl,
+        )
+    except requests.RequestException as exc:
+        return "", "", make_extraction_error(
+            "International Carbon Registry / ICR",
+            url,
+            "icr_detail_fetch_failed",
+            str(exc),
+            "Open the detail page manually or retry later.",
+        ), False
+    if response.status_code != 200:
+        return "", "", make_extraction_error(
+            "International Carbon Registry / ICR",
+            response.url or url,
+            "icr_detail_non_200_status",
+            f"Non-200 status: {response.status_code}",
+            "Open the detail page manually or retry later.",
+        ), False
+    if "html" not in response.headers.get("content-type", "").lower():
+        return "", "", None, False
+    title, source = title_from_icr_detail_page(response.text, code)
+    return title, source, None, True
+
+
+def enrich_icr_candidates_from_detail_pages(
+    candidates: list[dict],
+    allow_insecure_ssl: bool,
+) -> tuple[list[dict], list[dict], dict[str, int]]:
+    enriched = []
+    errors = []
+    metrics = {
+        "icr_candidates_found": 0,
+        "icr_detail_pages_fetched": 0,
+        "icr_titles_extracted": 0,
+        "icr_titles_still_requiring_review": 0,
+        "icr_fetch_failures": 0,
+    }
+
+    for candidate in candidates:
+        is_icr_methodunit = (
+            candidate.get("candidate_type") == "methodunit_candidate"
+            and bool(CODE_PATTERNS["icr"].search(candidate.get("methodunit_code", "")))
+        )
+        if not is_icr_methodunit:
+            enriched.append(candidate)
+            continue
+
+        metrics["icr_candidates_found"] += 1
+        existing_title = normalize_text(candidate.get("methodunit_name", ""))
+        document_url = clean_url(candidate.get("document_url", ""))
+        code = normalize_text(candidate.get("methodunit_code", ""))
+
+        if existing_title and existing_title != "Title requires review":
+            candidate["notes"] = normalize_text(f"{candidate.get('notes', '')} Title from index page.")
+
+        if document_url:
+            detail_title, detail_source, error, fetched = fetch_icr_detail_title(
+                document_url,
+                code,
+                allow_insecure_ssl,
+            )
+            if fetched:
+                metrics["icr_detail_pages_fetched"] += 1
+            if error:
+                metrics["icr_fetch_failures"] += 1
+                errors.append(error)
+            if detail_title:
+                candidate["methodunit_name"] = detail_title
+                candidate["notes"] = normalize_text(f"{candidate.get('notes', '')} Title enriched from {detail_source}.")
+                if candidate.get("methodunit_code") and candidate.get("status") and candidate.get("document_url"):
+                    candidate["confidence"] = "high"
+                else:
+                    candidate["confidence"] = "medium"
+                metrics["icr_titles_extracted"] += 1
+
+        if not normalize_text(candidate.get("methodunit_name", "")) or candidate.get("methodunit_name") == "Title requires review":
+            candidate["methodunit_name"] = "Title requires review"
+            candidate["confidence"] = "medium"
+            candidate["notes"] = normalize_text(f"{candidate.get('notes', '')} title missing; detail page review required.")
+            metrics["icr_titles_still_requiring_review"] += 1
+
+        enriched.append(candidate)
+
+    return enriched, errors, metrics
 
 
 def table_cell_is_metadata(header: str, value: str) -> bool:
@@ -1230,7 +1380,9 @@ def extract_icr_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = Fa
             "Candidate methodology from ICR public methodology page.",
         )
     )
-    return apply_candidate_classification(candidates, "icr"), ""
+    classified = apply_candidate_classification(candidates, "icr")
+    enriched, detail_errors, metrics = enrich_icr_candidates_from_detail_pages(classified, allow_insecure_ssl)
+    return enriched, detail_errors, metrics
 
 
 def extract_asia_carbon_institute_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = False) -> tuple[list[dict], dict | str]:
@@ -1273,17 +1425,33 @@ def run_candidate_extractors(
     }
     all_candidates = []
     errors = []
+    enrichment_metrics = {
+        "icr_candidates_found": 0,
+        "icr_detail_pages_fetched": 0,
+        "icr_titles_extracted": 0,
+        "icr_titles_still_requiring_review": 0,
+        "icr_fetch_failures": 0,
+    }
     for extractor_name in selected_extractors:
         extractor = extractor_map.get(extractor_name)
         if extractor is None:
             continue
-        candidates, error = extractor(profiles, allow_insecure_ssl)
+        result = extractor(profiles, allow_insecure_ssl)
+        candidates = result[0]
+        error = result[1] if len(result) > 1 else ""
+        metrics = result[2] if len(result) > 2 else {}
         all_candidates.extend(candidates)
         if error:
-            errors.append(error)
+            if isinstance(error, list):
+                errors.extend(error)
+            else:
+                errors.append(error)
+        for key in enrichment_metrics:
+            enrichment_metrics[key] += int(metrics.get(key, 0) or 0)
     return (
         pd.DataFrame([{column: candidate.get(column, "") for column in CANDIDATE_SCHEMA} for candidate in all_candidates], columns=CANDIDATE_SCHEMA),
         pd.DataFrame([{column: error.get(column, "") for column in EXTRACTION_ERROR_SCHEMA} for error in errors], columns=EXTRACTION_ERROR_SCHEMA),
+        enrichment_metrics,
     )
 
 
@@ -1820,17 +1988,19 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
 
     if run_extraction:
         with st.spinner("Extracting candidate MethodUnits from selected public source pages..."):
-            candidates_df, errors_df = run_candidate_extractors(
+            candidates_df, errors_df, enrichment_metrics = run_candidate_extractors(
                 selected_extractors,
                 data["source_profiles"],
                 allow_insecure_ssl=allow_insecure_ssl,
             )
         st.session_state["candidate_extraction_results"] = candidates_df
         st.session_state["candidate_extraction_errors"] = errors_df
+        st.session_state["candidate_extraction_enrichment_metrics"] = enrichment_metrics
         st.session_state["candidate_extraction_sources_attempted"] = len(selected_extractors)
 
     candidates = st.session_state.get("candidate_extraction_results", pd.DataFrame(columns=CANDIDATE_SCHEMA))
     errors = st.session_state.get("candidate_extraction_errors", pd.DataFrame(columns=EXTRACTION_ERROR_SCHEMA))
+    enrichment_metrics = st.session_state.get("candidate_extraction_enrichment_metrics", {})
     sources_attempted = st.session_state.get("candidate_extraction_sources_attempted", 0)
 
     methodunit_count = count_value(candidates, "candidate_type", "methodunit_candidate")
@@ -1873,6 +2043,16 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
             ("Candidates missing title", len(missing_title)),
             ("Candidates missing status", len(missing_status)),
             ("Candidates needing review", len(needs_review)),
+        ]
+    )
+    st.caption("ICR detail-page enrichment")
+    metric_row(
+        [
+            ("ICR candidates found", int(enrichment_metrics.get("icr_candidates_found", 0) or 0)),
+            ("ICR detail pages fetched", int(enrichment_metrics.get("icr_detail_pages_fetched", 0) or 0)),
+            ("ICR titles extracted", int(enrichment_metrics.get("icr_titles_extracted", 0) or 0)),
+            ("ICR titles still requiring review", int(enrichment_metrics.get("icr_titles_still_requiring_review", 0) or 0)),
+            ("ICR fetch failures", int(enrichment_metrics.get("icr_fetch_failures", 0) or 0)),
         ]
     )
 
