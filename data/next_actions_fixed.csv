@@ -1,0 +1,62 @@
+program_name,next_action
+American Carbon Registry (ACR),"Develop or reuse connector to scrape catalogue/list pages, parse MethodUnit metadata, and schedule periodic runs."
+Applied Ecological Institute (AEI),Manually curate method metadata; store as static profile; schedule periodic review.
+ART/TREES,Build semi-automated PDF/document extraction and manually validate extracted metadata.
+Artisan C-sink,Manually curate method metadata; store as static profile; schedule periodic review.
+Asia Carbon Institute,Map accepted external methodologies to source standards and avoid duplicating underlying MethodUnits.
+Axon Protocol,Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+BioCarbon Registry,"Develop or reuse connector to scrape catalogue/list pages, parse MethodUnit metadata, and schedule periodic runs."
+C-Capsule,Build semi-automated PDF/document extraction and manually validate extracted metadata.
+Carbon Registry in India,Resolve duplicate/alias relationship and map to a canonical programme before ingestion.
+Carbon Zero,Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+CarbonClear,Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+Carbon Registry Thailand (CRT),Resolve duplicate/alias relationship and map to a canonical programme before ingestion.
+Cercarbono,"Develop or reuse connector to scrape catalogue/list pages, parse MethodUnit metadata, and schedule periodic runs."
+China Certified Emission Reductions (CCER),Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+City Forest Credits,Manually curate CFC Standard and protocol PDFs; schedule annual source checks.
+Clean Development Mechanism (CDM),"Develop or reuse connector to scrape catalogue/list pages, parse MethodUnit metadata, and schedule periodic runs."
+Climate Action Reserve,"Develop or reuse connector to scrape catalogue/list pages, parse MethodUnit metadata, and schedule periodic runs."
+Climate Forward,"Develop or reuse connector to scrape catalogue/list pages, parse MethodUnit metadata, and schedule periodic runs."
+ColCX,Manually curate method metadata; store as static profile; schedule periodic review.
+Covalent,Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+Credible Carbon,Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+Credit Climatic,Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+Economy of Love,"Develop or reuse connector to scrape catalogue/list pages, parse MethodUnit metadata, and schedule periodic runs."
+Ecosystem Restoration Standard,Resolve duplicate/alias relationship and map to a canonical programme before ingestion.
+Ecosystem Restoration Standard (ERS),Manually curate method metadata; store as static profile; schedule periodic review.
+Eko Carbon Exchange,Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+Emissions Reduction Fund (ERF),"Develop or reuse connector to scrape catalogue/list pages, parse MethodUnit metadata, and schedule periodic runs."
+Equitable Earth,Manually curate method metadata; store as static profile; schedule periodic review.
+Genesys Reserve,Build semi-automated extraction using headless browser/API inspection; manually review outputs.
+Global Carbon Council (GCC),"Develop or reuse connector to scrape catalogue/list pages, parse MethodUnit metadata, and schedule periodic runs."
+Global Climate Registry (GCR),Extract methodology references from project/registry records only when ingesting project data.
+Global Heat Reduction (SCS Global Services),Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+Gold Standard,Build semi-automated extraction using headless browser/API inspection; manually review outputs.
+Greenhouse Gas Reduction Offset Project (Taiwan),Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+Inclusive Carbon Standard,Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+Indian Carbon Registry,Resolve duplicate/alias relationship and map to a canonical programme before ingestion.
+International Carbon Registry (ICR),Build a catalog-first HTML connector for the public ICR methodologies table; schedule quarterly checks.
+Isometric,"Develop or reuse connector to scrape catalogue/list pages, parse MethodUnit metadata, and schedule periodic runs."
+Joint Crediting Mechanism (JCM),"Develop or reuse connector to scrape catalogue/list pages, parse MethodUnit metadata, and schedule periodic runs."
+Mongolian Forest Carbon Program,Manually curate method metadata; store as static profile; schedule periodic review.
+Moor Futures,Manually curate method metadata; store as static profile; schedule periodic review.
+Natural Forest Standard (NFS),Manually curate method metadata; store as static profile; schedule periodic review.
+NCX (formerly known as SilviaTerre),Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+Nori Carbon,Manually curate method metadata; store as static profile; schedule periodic review.
+Open Carbon Protocol,Validate the existing workbook MethodUnit against an official source; keep provisional until evidence is confirmed.
+Open Forest Protocol,Manually curate method metadata; store as static profile; schedule periodic review.
+OxCarbon,Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+Peatland Code,Manually curate method metadata; store as static profile; schedule periodic review.
+Plan Vivo,"Develop or reuse connector to scrape catalogue/list pages, parse MethodUnit metadata, and schedule periodic runs."
+Puro Earth,"Develop or reuse connector to scrape catalogue/list pages, parse MethodUnit metadata, and schedule periodic runs."
+Regenerative Agriculture Standard,Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+Riverse,Build semi-automated extraction using headless browser/API inspection; manually review outputs.
+Rock C-sink,Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+Russian Carbon Registry (RCR),"Develop or reuse connector to scrape catalogue/list pages, parse MethodUnit metadata, and schedule periodic runs."
+Sequdia Carbon,Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+Social Carbon,Map accepted external methodologies to source standards and avoid duplicating underlying MethodUnits.
+Sri Lanka Climate Fund,Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+Thailand Voluntary Emission Reduction Program (TVER),"Develop or reuse connector to scrape catalogue/list pages, parse MethodUnit metadata, and schedule periodic runs."
+Transparency and Equitable Resource Offset (TERO),Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.
+Verified Carbon Standard (Verra),Build semi-automated extraction using headless browser/API inspection; manually review outputs.
+Wilder Carbon,Monitor programme; perform manual investigation to confirm whether methodologies exist; update inventory.

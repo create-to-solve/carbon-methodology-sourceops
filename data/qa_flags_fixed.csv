@@ -1,0 +1,23 @@
+program_name,issue
+Ecosystem Restoration Standard,Duplicate entry for Ecosystem Restoration Standard and Ecosystem Restoration Standard (ERS); unify naming.
+Puro Earth,Variant naming: PuroEarth vs Puro Earth; unify naming.
+Carbon Registry in India,Ambiguous program; may duplicate Indian Carbon Registry.
+Indian Carbon Registry,Ambiguous program; may duplicate Carbon Registry in India.
+Ecosystem Restoration Standard (ERS),Duplicate of Ecosystem Restoration Standard; unify naming.
+Moor Futures,Methodology not publicly available; manual investigation required.
+Genesys Reserve,Methodologies planned but not yet available; monitor for updates.
+Global Climate Registry (GCR),Registry does not publish methodologies; skip unless guidelines appear.
+C-Capsule,Only methodology approval procedure available; no specific methods; treat accordingly.
+TERO,Transparency and Equitable Resource Offset (TERO) has 5 rows but lacks public source; manual investigation needed.
+Carbon Registry Thailand (CRT),May refer to TVER or registry; clarify naming and unify.
+Greenhouse Gas Reduction Offset Project (Taiwan),Programme details unclear; verify existence and methodology source.
+source_profiles_final.csv,Original CSV had URL text-fragment commas spilling into notes/extraction_wave columns; structural CSV quoting repaired.
+source_profiles_final.csv,"Populated-source count corrected to 23 programmes and 538 MethodUnit rows by fixing Natural Forest Standard, Puro Earth, Russian Carbon Registry and Open Carbon Protocol."
+International Carbon Registry (ICR),Agent export left ICR blank/Wave 4 despite a public methodology catalogue; corrected to catalog-first HTML and Wave 1.
+City Forest Credits,Agent export left source profile blank; filled as a small protocol/standard PDF family requiring manual curation.
+Social Carbon,Classified as adopted-external-method source to avoid duplicating CDM/external MethodUnits.
+ColCX,Connector type filled as manual/PDF-first curation; validate whether workbook rows are direct MethodUnits or programme/guideline references.
+Applied Ecological Institute (AEI),Corrected spelling from Applied Eclogical Institute.
+Verified Carbon Standard (Verra),Normalized spelling from VERRA to Verra.
+ART/TREES,Normalized programme name from Art Tree to ART/TREES.
+Sequdia Carbon,Name may be a misspelling of Sequoia Carbon; left unchanged pending confirmation.
