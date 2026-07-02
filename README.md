@@ -8,7 +8,12 @@ Carbon methodology information is scattered across official sources that look ve
 
 ## Approach
 
-The app helps an analyst:
+The app has two layers:
+
+- a **stakeholder-facing demo layer** that shows one clear source-to-catalogue loop;
+- an **operational workbench layer** for deeper source checks, extraction, review, issue handling, and exports.
+
+It helps an analyst:
 
 1. Maintain a **Source Registry** of official source locations.
 2. Check whether official source pages are reachable.
@@ -23,37 +28,33 @@ The app does not approve methodologies. It produces review-ready records and evi
 ## Workflow
 
 ```text
-Source Registry
--> Live Source Check
+Official Source
 -> Source-Specific Extraction
 -> Extracted Methodology Records
--> Supporting Links
--> Issues to Resolve
+-> Supporting Links Separated
+-> Issues Flagged
 -> Review
 -> Export for Catalogue
 ```
 
 ## App Pages
 
-- **Start Here**: First-time reviewer briefing: problem, role of the app, pipeline, proof points, and current capability snapshot.
-- **Extraction Strategies**: Explains source archetypes and why one scraper is not enough.
-- **Current Capabilities**: Summarizes what works today and shows extractor status.
+- **Demo: Source to Catalogue**: Landing page and stakeholder demo. Runs a quick Climate Action Reserve or City Forest Credits extraction, then explains what worked, what needs review, what could not be accessed, and what was separated out.
 - **Coverage Plan**: Converts the 61-source registry into a wave-based onboarding roadmap for the rest of the standards.
-- **How to Read the Outputs**: Defines extracted records, Supporting Links, Issues to Resolve, Review Queue, and Export for Catalogue.
-- **Source Registry**: Filterable source registry from `source_profiles_final_fixed.csv`.
-- **Extract from Sources**: Source pre-checks and supported source-specific extraction.
-- **Review Extracted Records**: Review queue for current, uploaded, or saved extracted methodology records.
-- **Supporting Links**: Full classified source-link audit table.
-- **Issues to Resolve**: Data-quality issues, source-access failures, extraction errors, and review-needed records.
-- **Export for Catalogue**: Download or timestamp-save review-ready outputs.
-- **Roadmap**: Extraction strategy, extraction waves, MethodUnit rationale, and future priorities.
+- **Workbench**: Operational tabs for Source Registry, Extract from Sources, Review Extracted Records, Supporting Links, Issues to Resolve, Export for Catalogue, and How to Read Outputs. This is where detailed diagnostics remain available.
+- **Roadmap**: Current implemented sources, next sources, later PDF parsing, later browser automation, AI-assisted review, and persistent review workflow.
+
+The old detailed pages are still available as Workbench tabs rather than separate sidebar pages.
 
 ## Current Capabilities
 
 - Source Registry loads the current programme source profile table.
+- Demo page can run a small source-to-export loop for Climate Action Reserve or City Forest Credits.
+- Demo page presents interpreted results for stakeholders, while detailed extraction diagnostics stay in an expandable section and in the Workbench.
 - Live Source Check can verify selected source URLs.
 - Climate Action Reserve extractor pulls structured protocol table records.
 - ICR extractor discovers M-ICR methodology codes and detail URLs, with conservative title review.
+- City Forest Credits extractor discovers protocol/standard document links for review.
 - Asia Carbon Institute source-access/SSL failures are logged rather than bypassed by default.
 - Supporting Links are classified as:
   - `methodunit_candidate`
@@ -68,6 +69,7 @@ Source Registry
 - **Climate Action Reserve**: working structured-table extraction.
 - **International Carbon Registry / ICR**: discovery-only / needs title review.
 - **Asia Carbon Institute**: blocked or source-exception-prone due to SSL/source access.
+- **City Forest Credits**: document/protocol-family extraction implemented; linked PDFs are discovered but not fully parsed.
 
 Other sources are represented in the Source Registry and Roadmap but are not yet implemented as extractors.
 
@@ -96,13 +98,31 @@ The page also groups expansion into waves:
 
 This makes coverage expansion auditable: classify the source, check URL readiness, choose the extraction strategy, review outputs, then export to the catalogue.
 
+## Workbench
+
+The Workbench is the operational area after a reviewer understands the demo. It keeps the existing workflow in tabs:
+
+- **Source Registry**: filter and inspect official source profile rows.
+- **Extract from Sources**: run live source checks and supported source-specific extraction.
+- **Review Extracted Records**: inspect possible methodology/protocol records before catalogue handoff.
+- **Supporting Links**: preserve useful non-record links such as PDFs, FAQs, templates, guidance pages, development pages, navigation links, and excluded links.
+- **Issues to Resolve**: collect broken URLs, SSL problems, stale links, missing titles, source-access failures, and QA flags.
+- **Export for Catalogue**: download or timestamp-save review-ready outputs.
+- **How to Read Outputs**: explains confidence, review status, supporting links, and why candidates are not approved methodologies.
+
+Within the Workbench, **Extract from Sources** is the producer step. It creates the latest extracted records, supporting links, and extraction issues. **Review Extracted Records**, **Supporting Links**, **Issues to Resolve**, and **Export for Catalogue** are consumer steps: they read from the latest extraction run first, then from the latest saved outputs when no run is loaded. A quick Demo run also populates the same session outputs used by the Workbench.
+
+The Workbench intentionally remains more detailed than the Demo page. It includes operational diagnostics such as source-check status, extraction errors, classified links, missing fields, and extractor-specific quality metrics.
+
 ## How to Read Confidence
 
 High confidence means the extraction looked structurally strong. It does not mean the methodology is legally, commercially, or carbon-market approved. All extracted records require human review before catalogue ingestion.
 
+For ICR, discovery records with suspicious or incomplete titles are labelled for research even when codes and detail URLs are found. These records are preserved, but they should be treated as discovery records until titles are manually verified.
+
 ## Limitations
 
-- No linked PDFs are fetched.
+- Linked PDFs are discovered where visible, but full PDF text is not fetched or parsed.
 - No JavaScript-heavy portals are automated yet.
 - No logins, paywalls, CAPTCHAs, DocSend gates, or access controls are bypassed.
 - No accounts are created.
@@ -146,7 +166,8 @@ The Export for Catalogue page can write timestamped files to `outputs/`, includi
 
 1. Repair or confirm stale Source Registry URLs before building more extractors.
 2. Use Coverage Plan waves to pick the next extractor.
-3. Add the next stable HTML catalogue extractor, likely ACR after URL repair.
-4. Add controlled PDF metadata extraction for document-first sources.
-5. Add persistent review decisions.
-6. Add catalogue import validation once the extracted-record schema stabilizes.
+3. Add Plan Vivo and Climate Forward as the next controlled extractors after City Forest Credits.
+4. Add the next stable HTML catalogue extractor, likely ACR after URL repair.
+5. Add controlled PDF metadata extraction for document-first sources.
+6. Add persistent review decisions.
+7. Add catalogue import validation once the extracted-record schema stabilizes.

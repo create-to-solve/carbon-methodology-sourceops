@@ -91,6 +91,7 @@ SUPPORTED_EXTRACTORS = [
     "Climate Action Reserve",
     "International Carbon Registry / ICR",
     "Asia Carbon Institute",
+    "City Forest Credits",
 ]
 CODE_PATTERNS = {
     "icr": re.compile(r"\bM-ICR\s*\d{3,}\b", re.IGNORECASE),
@@ -161,6 +162,16 @@ NAVIGATION_LINK_TERMS = (
     "approved methodologies",
     "under development",
     "sector",
+)
+CFC_METHODUNIT_TERMS = (
+    "city forest credits standard",
+    "preservation protocol",
+    "afforestation",
+    "reforestation",
+    "afforestation/reforestation",
+    "carbon protocol",
+    "protocol",
+    "standard",
 )
 ICR_GENERIC_TITLE_LABELS = {
     "and public",
@@ -1475,6 +1486,124 @@ def extract_asia_carbon_institute_candidates(profiles: pd.DataFrame, allow_insec
     return apply_candidate_classification(candidates, "aci"), ""
 
 
+def clean_cfc_title(text: str) -> str:
+    title = normalize_text(text)
+    title = re.sub(r"\b(download|view|open|read|pdf|document)\b\s*[:|-]?", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\s*[-|]\s*(city forest credits|carbon credits|urban forest carbon registry).*$", "", title, flags=re.IGNORECASE)
+    return normalize_text(title.strip(" :-|"))
+
+
+def is_likely_cfc_methodunit(text: str, href: str) -> bool:
+    combined = f"{normalize_text(text)} {href}".lower()
+    if any(term in combined for term in SUPPORTING_DOCUMENT_TERMS + DEVELOPMENT_PAGE_TERMS):
+        return False
+    if any(term in combined for term in ["blog", "news", "press", "contact", "donate", "login", "webinar"]):
+        return False
+    if "protocol" in combined and any(term in combined for term in ["preservation", "afforestation", "reforestation", "carbon"]):
+        return True
+    if "city forest credits standard" in combined:
+        return True
+    if "standard" in combined and any(term in combined for term in ["city forest", "carbon", "credit"]):
+        return True
+    return False
+
+
+def is_relevant_cfc_supporting_link(text: str, href: str) -> bool:
+    combined = f"{normalize_text(text)} {href}".lower()
+    if not combined.strip():
+        return False
+    if any(term in combined for term in SUPPORTING_DOCUMENT_TERMS + DEVELOPMENT_PAGE_TERMS):
+        return True
+    if any(term in combined for term in ["protocol", "standard", "carbon", "credit", ".pdf", "guidance", "template"]):
+        return True
+    return False
+
+
+def extract_cfc_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = False) -> tuple[list[dict], dict | str, dict[str, int]]:
+    profile = get_program_profile(profiles, ["City Forest Credits"])
+    source_url = profile_source_url(profile)
+    response, error = fetch_public_source(source_url, "City Forest Credits", allow_insecure_ssl)
+    metrics = {
+        "cfc_records_found": 0,
+        "cfc_document_links_found": 0,
+        "cfc_supporting_links_found": 0,
+        "cfc_records_missing_version": 0,
+        "cfc_fetch_failures": 0,
+    }
+    if error:
+        metrics["cfc_fetch_failures"] = 1
+        return [], error, metrics
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    candidates = []
+    seen_links = set()
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor.get("href") or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        link_text = normalize_text(anchor.get_text(" ", strip=True))
+        document_url = urljoin(response.url, href)
+        link_key = document_url.lower()
+        if link_key in seen_links:
+            continue
+        seen_links.add(link_key)
+
+        if is_pdf_or_document_url(document_url) or ".pdf" in href.lower():
+            metrics["cfc_document_links_found"] += 1
+
+        title = clean_cfc_title(link_text)
+        if not title:
+            title = clean_cfc_title(Path(urlparse(document_url).path).stem.replace("-", " ").replace("_", " "))
+        version = extract_version(f"{link_text} {href}")
+
+        if is_likely_cfc_methodunit(link_text, href):
+            unit_type = "Standard" if "standard" in f"{title} {href}".lower() and "protocol" not in f"{title} {href}".lower() else "Protocol"
+            confidence = "high" if title and document_url else "medium"
+            if not version:
+                metrics["cfc_records_missing_version"] += 1
+            metrics["cfc_records_found"] += 1
+            candidates.append(
+                make_candidate(
+                    profile,
+                    "",
+                    title,
+                    unit_type,
+                    "",
+                    version,
+                    "pending/public source",
+                    response.url,
+                    document_url,
+                    "cfc_document_link_parse",
+                    confidence,
+                    "Extracted from the City Forest Credits carbon protocols page; linked documents are discovered but not fully parsed.",
+                )
+            )
+            candidates[-1]["candidate_type"] = "methodunit_candidate"
+            candidates[-1]["classification_reason"] = "City Forest Credits protocol/standard document link detected."
+        elif is_relevant_cfc_supporting_link(link_text, href):
+            metrics["cfc_supporting_links_found"] += 1
+            candidates.append(
+                make_candidate(
+                    profile,
+                    "",
+                    title or document_url,
+                    "supporting_link",
+                    "",
+                    version,
+                    "",
+                    response.url,
+                    document_url,
+                    "cfc_supporting_link_parse",
+                    "medium",
+                    "Supporting link found on the City Forest Credits carbon protocols page; not treated as a methodology/protocol record.",
+                )
+            )
+            candidates[-1]["candidate_type"] = "supporting_document"
+            candidates[-1]["classification_reason"] = "City Forest Credits supporting or non-protocol link."
+
+    return dedupe_candidates(candidates), "", metrics
+
+
 def run_candidate_extractors(
     selected_extractors: list[str],
     profiles: pd.DataFrame,
@@ -1484,6 +1613,7 @@ def run_candidate_extractors(
         "Climate Action Reserve": extract_climate_action_reserve_candidates,
         "International Carbon Registry / ICR": extract_icr_candidates,
         "Asia Carbon Institute": extract_asia_carbon_institute_candidates,
+        "City Forest Credits": extract_cfc_candidates,
     }
     all_candidates = []
     errors = []
@@ -1494,6 +1624,11 @@ def run_candidate_extractors(
         "icr_titles_still_requiring_review": 0,
         "icr_fetch_failures": 0,
         "icr_suspicious_titles_rejected": 0,
+        "cfc_records_found": 0,
+        "cfc_document_links_found": 0,
+        "cfc_supporting_links_found": 0,
+        "cfc_records_missing_version": 0,
+        "cfc_fetch_failures": 0,
     }
     for extractor_name in selected_extractors:
         extractor = extractor_map.get(extractor_name)
@@ -1512,7 +1647,9 @@ def run_candidate_extractors(
         for key in enrichment_metrics:
             enrichment_metrics[key] += int(metrics.get(key, 0) or 0)
     return (
-        pd.DataFrame([{column: candidate.get(column, "") for column in CANDIDATE_SCHEMA} for candidate in all_candidates], columns=CANDIDATE_SCHEMA),
+        apply_output_safeguards(
+            pd.DataFrame([{column: candidate.get(column, "") for column in CANDIDATE_SCHEMA} for candidate in all_candidates], columns=CANDIDATE_SCHEMA)
+        ),
         pd.DataFrame([{column: error.get(column, "") for column in EXTRACTION_ERROR_SCHEMA} for error in errors], columns=EXTRACTION_ERROR_SCHEMA),
         enrichment_metrics,
     )
@@ -1526,8 +1663,87 @@ def ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return ensured
 
 
+def is_icr_program_name(value: str) -> bool:
+    program_name = normalize_text(value).lower()
+    return "international carbon registry" in program_name or program_name == "icr" or " / icr" in program_name
+
+
+def is_suspicious_icr_methodunit_name(value: str) -> bool:
+    title = normalize_text(value)
+    title_l = title.lower()
+    if not title:
+        return True
+    if title_l == "title requires review":
+        return True
+    if len(title) > 140:
+        return True
+    suspicious_markers = [
+        "summary:",
+        "sectoral scope",
+        "date of first approval",
+        "current stage",
+    ]
+    if title_l.startswith("id:"):
+        return True
+    return any(marker in title_l for marker in suspicious_markers)
+
+
+def append_note(existing: str, note: str) -> str:
+    existing = normalize_text(existing)
+    if note.lower() in existing.lower():
+        return existing
+    return normalize_text(f"{existing} {note}")
+
+
+def apply_output_safeguards(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "program_name" not in df.columns or "methodunit_name" not in df.columns:
+        return df.copy()
+    safe = df.copy()
+    for column in ["candidate_type", "confidence", "review_status", "notes"]:
+        if column not in safe.columns:
+            safe[column] = ""
+    suspicious_icr = safe.apply(
+        lambda row: str(row.get("candidate_type", "")) in ["", "methodunit_candidate"]
+        and is_icr_program_name(row.get("program_name", ""))
+        and is_suspicious_icr_methodunit_name(row.get("methodunit_name", "")),
+        axis=1,
+    )
+    if suspicious_icr.any():
+        safe.loc[suspicious_icr, "confidence"] = "medium"
+        safe.loc[suspicious_icr, "review_status"] = "needs_research"
+        safe.loc[suspicious_icr, "notes"] = safe.loc[suspicious_icr, "notes"].map(
+            lambda value: append_note(value, "ICR title requires manual review.")
+        )
+    return safe
+
+
+def add_record_readiness(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        ready = df.copy()
+        ready["record_readiness"] = ""
+        return ready
+    ready = apply_output_safeguards(df)
+    ready["record_readiness"] = "ready_for_review"
+    source_issue = ready.get("source_url", pd.Series("", index=ready.index)).astype(str).str.strip().eq("")
+    needs_research = (
+        ready.get("review_status", pd.Series("", index=ready.index)).astype(str).str.lower().eq("needs_research")
+        | ready.get("methodunit_name", pd.Series("", index=ready.index)).astype(str).str.strip().isin(["", "Title requires review"])
+        | ready.get("confidence", pd.Series("", index=ready.index)).astype(str).str.lower().eq("low")
+        | ready.apply(
+            lambda row: is_icr_program_name(row.get("program_name", ""))
+            and is_suspicious_icr_methodunit_name(row.get("methodunit_name", "")),
+            axis=1,
+        )
+    )
+    ready.loc[needs_research, "record_readiness"] = "needs_research"
+    ready.loc[source_issue, "record_readiness"] = "source_issue"
+    return ready
+
+
 def current_extracted_links() -> pd.DataFrame:
-    return st.session_state.get("candidate_extraction_results", pd.DataFrame(columns=CANDIDATE_SCHEMA)).copy()
+    return apply_output_safeguards(
+        st.session_state.get("candidate_extraction_results", pd.DataFrame(columns=CANDIDATE_SCHEMA)).copy()
+    )
 
 
 def current_methodunit_candidates() -> pd.DataFrame:
@@ -1581,13 +1797,20 @@ def session_or_output(
     columns: list[str],
 ) -> tuple[pd.DataFrame, str]:
     if not session_df.empty:
-        return ensure_columns(session_df, columns), "current Streamlit session"
-    exact = load_output_csv(exact_file_name, columns)
-    if not exact.empty:
-        return exact, f"outputs/{exact_file_name}"
+        df = ensure_columns(session_df, columns)
+        if columns == CANDIDATE_SCHEMA:
+            df = apply_output_safeguards(df)
+        return df, "current Streamlit session"
     latest = latest_output_csv(latest_prefix, columns)
     if not latest.empty:
+        if columns == CANDIDATE_SCHEMA:
+            latest = apply_output_safeguards(latest)
         return latest, f"latest outputs/{latest_prefix}_*.csv"
+    exact = load_output_csv(exact_file_name, columns)
+    if not exact.empty:
+        if columns == CANDIDATE_SCHEMA:
+            exact = apply_output_safeguards(exact)
+        return exact, f"outputs/{exact_file_name}"
     return pd.DataFrame(columns=columns), "none"
 
 
@@ -1696,6 +1919,11 @@ def derive_onboarding_plan(profiles: pd.DataFrame) -> pd.DataFrame:
             category = "Working extractor"
             wave = "Wave 1: Stabilize working extractors"
             action = "Treat as source exception until SSL/source access is resolved; preserve adopted-method logic."
+        elif program_in(row, ["City Forest Credits"]):
+            extraction_status = "partial extractor: document/protocol-family links"
+            category = "Working extractor"
+            wave = "Wave 1: Stabilize working extractors"
+            action = "Use document/protocol-family extraction; full PDF parsing is not yet implemented."
         elif source_url and source_url.lower() in failed_urls:
             extraction_status = "source URL failed live check"
             category = "Needs URL repair"
@@ -1907,6 +2135,7 @@ def start_here_page(data: dict[str, pd.DataFrame]) -> None:
         {"Capability": "Climate Action Reserve extractor", "Current State": "working structured-table extraction"},
         {"Capability": "ICR extractor", "Current State": "discovery-only / pending review"},
         {"Capability": "Asia Carbon Institute", "Current State": "source-access issue due to SSL"},
+        {"Capability": "City Forest Credits extractor", "Current State": "document/protocol-family links; no full PDF parsing yet"},
         {"Capability": "Review Extracted Records", "Current State": "prototype"},
         {"Capability": "Export for Catalogue", "Current State": "working"},
         {"Capability": "Persistent database", "Current State": "not yet"},
@@ -1945,9 +2174,9 @@ def extraction_strategies_page(data: dict[str, pd.DataFrame]) -> None:
         },
         {
             "Source Archetype": "PDF / document family",
-            "Example Sources": "ART/TREES, C-Capsule",
+            "Example Sources": "City Forest Credits, ART/TREES, C-Capsule",
             "Extraction Strategy": "List official documents, then extract metadata from PDFs only in a later controlled workflow.",
-            "Current Status": "Strategy only",
+            "Current Status": "Implemented for City Forest Credits at document-link level",
             "Role of AI": "Assist document metadata extraction with citations.",
         },
         {
@@ -1987,6 +2216,7 @@ def current_capabilities_page(data: dict[str, pd.DataFrame]) -> None:
         "Check whether selected source URLs are reachable.",
         "Extract Climate Action Reserve protocol table candidates.",
         "Discover ICR M-ICR methodology codes and detail URLs.",
+        "Extract City Forest Credits protocol/standard document links without parsing full PDFs.",
         "Log Asia Carbon Institute SSL/source-access failure as an issue to resolve.",
         "Classify Supporting Links into methodunit_candidate, supporting_document, development_page, navigation_link, and exclude.",
         "Export extracted methodology records, Supporting Links, QA flags, Source Registry records, and extraction errors.",
@@ -1999,7 +2229,7 @@ def current_capabilities_page(data: dict[str, pd.DataFrame]) -> None:
         {"Extractor": "CAR", "Status": "working extractor", "Interpretation": "Structured protocol table extraction is working."},
         {"Extractor": "ICR", "Status": "discovery-only / needs title review", "Interpretation": "M-ICR codes and detail URLs are discovered, but titles require cautious review."},
         {"Extractor": "ACI", "Status": "blocked/source exception", "Interpretation": "Public source may fail SSL verification; error is logged instead of bypassed by default."},
-        {"Extractor": "CFC", "Status": "reachable but not yet implemented", "Interpretation": "Good candidate for a later small-standard extractor."},
+        {"Extractor": "CFC", "Status": "document/protocol-family extractor implemented", "Interpretation": "Protocol and standard document links are discovered; full PDF parsing is not implemented."},
         {"Extractor": "ACR", "Status": "stale URL to repair before extractor", "Interpretation": "Fix Source Registry URL before building extraction logic."},
         {"Extractor": "CDM", "Status": "reachable/review", "Interpretation": "Large source; needs careful scoped extraction design."},
     ]
@@ -2014,6 +2244,319 @@ def current_capabilities_page(data: dict[str, pd.DataFrame]) -> None:
             ("Live source failures", len(current_live_source_failures())),
         ]
     )
+
+
+def normalize_demo_extraction_result(result: tuple) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int]]:
+    candidates = result[0] if len(result) > 0 else []
+    error = result[1] if len(result) > 1 else ""
+    metrics = result[2] if len(result) > 2 else {}
+    errors = []
+    if error:
+        if isinstance(error, list):
+            errors.extend(error)
+        else:
+            errors.append(error)
+    return (
+        apply_output_safeguards(
+            pd.DataFrame(
+                [{column: candidate.get(column, "") for column in CANDIDATE_SCHEMA} for candidate in candidates],
+                columns=CANDIDATE_SCHEMA,
+            )
+        ),
+        pd.DataFrame(
+            [{column: row.get(column, "") for column in EXTRACTION_ERROR_SCHEMA} for row in errors],
+            columns=EXTRACTION_ERROR_SCHEMA,
+        ),
+        metrics,
+    )
+
+
+def demo_source_to_catalogue_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Demo: Source to Catalogue")
+    page_summary("A short stakeholder-facing loop from an official source page to review-ready catalogue export files.")
+
+    st.write(
+        "This is an upstream ingestion layer for a carbon methodology catalogue. It does not replace the catalogue. "
+        "It checks official source pages, runs source-specific extraction, separates supporting links, logs issues, "
+        "and exports review-ready records."
+    )
+    st.info(
+        "Extracted records are not automatically approved methodologies. They remain pending review until a human reviewer accepts, rejects, or researches them."
+    )
+
+    st.subheader("Source-to-Catalogue Loop")
+    step_columns = st.columns(4)
+    for column, label, detail in zip(
+        step_columns,
+        ["Official Source", "Extract Records", "Review", "Export for Catalogue"],
+        [
+            "Start from a public programme source page.",
+            "Run a small source-specific extractor.",
+            "Separate records, supporting links, and issues.",
+            "Download review-ready CSVs for catalogue work.",
+        ],
+    ):
+        with column:
+            st.markdown(f"**{label}**")
+            st.caption(detail)
+    st.markdown("**Official Source -> Extract Records -> Review -> Export for Catalogue**")
+
+    st.subheader("What This Demo Shows")
+    summary_columns = st.columns(4)
+    cards = [
+        ("What is this?", "Upstream ingestion layer for methodology catalogues."),
+        ("What works now?", "CAR structured-table extraction; CFC document/protocol-family extraction; ICR discovery; ACI source exception."),
+        ("What does it produce?", "Extracted records, supporting links, issues, and export files."),
+        ("What is next?", "Plan Vivo and Climate Forward."),
+    ]
+    for column, (title, body) in zip(summary_columns, cards):
+        with column:
+            st.markdown(f"**{title}**")
+            st.write(body)
+
+    st.subheader("Run a Quick Demo")
+    st.write(
+        "Choose one small, public source and run the existing extraction logic. "
+        "Run Climate Action Reserve first to see the complete source-to-export loop."
+    )
+    st.caption("Running a quick demo also populates the Workbench review, supporting links, issues, and export tabs.")
+
+    demo_source = st.selectbox(
+        "Demo source",
+        ["Climate Action Reserve", "City Forest Credits"],
+        key="demo_source_selector",
+    )
+    extractor_map = {
+        "Climate Action Reserve": extract_climate_action_reserve_candidates,
+        "City Forest Credits": extract_cfc_candidates,
+    }
+
+    if st.button("Run demo extraction", type="primary"):
+        extractor = extractor_map[demo_source]
+        with st.spinner(f"Checking official source and extracting records for {demo_source}..."):
+            candidates, errors, metrics = normalize_demo_extraction_result(
+                extractor(data.get("source_profiles", pd.DataFrame()))
+            )
+        st.session_state["candidate_extraction_results"] = candidates
+        st.session_state["candidate_extraction_errors"] = errors
+        st.session_state["candidate_extraction_enrichment_metrics"] = metrics
+        st.session_state["candidate_extraction_sources_attempted"] = 1
+        st.session_state["demo_source_last_run"] = demo_source
+
+    candidates = apply_output_safeguards(
+        st.session_state.get("candidate_extraction_results", pd.DataFrame(columns=CANDIDATE_SCHEMA))
+    )
+    errors = st.session_state.get("candidate_extraction_errors", pd.DataFrame(columns=EXTRACTION_ERROR_SCHEMA))
+    enrichment_metrics = st.session_state.get("candidate_extraction_enrichment_metrics", {})
+    sources_attempted = st.session_state.get("candidate_extraction_sources_attempted", 0)
+    last_run = st.session_state.get("demo_source_last_run", "")
+
+    if candidates.empty and errors.empty:
+        st.info("Run Climate Action Reserve first to see the complete source-to-export loop.")
+        return
+
+    if last_run:
+        st.caption(f"Current demo/session output: {last_run}")
+    extracted_records = candidates[candidates.get("candidate_type", pd.Series(dtype=str)).eq("methodunit_candidate")].copy()
+    supporting_links = candidates[~candidates.get("candidate_type", pd.Series(dtype=str)).eq("methodunit_candidate")].copy()
+    extracted_with_readiness = add_record_readiness(extracted_records)
+    issues_attention = len(errors) + count_value(extracted_with_readiness, "record_readiness", "needs_research") + count_value(
+        extracted_with_readiness,
+        "record_readiness",
+        "source_issue",
+    )
+
+    metric_row(
+        [
+            ("Sources attempted", sources_attempted or (1 if last_run else 0)),
+            ("Extracted methodology/protocol records", len(extracted_records)),
+            ("Supporting links separated", len(supporting_links)),
+            ("Issues requiring attention", issues_attention),
+        ]
+    )
+
+    st.subheader("Result Interpretation")
+
+    st.markdown("**What worked**")
+    ready_records = extracted_with_readiness[extracted_with_readiness["record_readiness"].eq("ready_for_review")]
+    if ready_records.empty:
+        st.info("No ready-for-review methodology/protocol records were produced in the current output.")
+    else:
+        worked_rows = []
+        for source_name, group in ready_records.groupby("program_name", dropna=False):
+            source_text = normalize_text(source_name)
+            if "Climate Action Reserve" in source_text:
+                interpretation = "structured-table extraction working"
+                action = "ready for review/export"
+            elif "City Forest Credits" in source_text:
+                interpretation = "document/protocol-family discovery working"
+                action = "review document titles and versions"
+            else:
+                interpretation = "source-specific extraction produced usable records"
+                action = "review and prepare for catalogue export"
+            worked_rows.append(
+                {
+                    "Source": source_text or "Unknown source",
+                    "Extracted records": len(group),
+                    "Interpretation": interpretation,
+                    "Recommended next action": action,
+                }
+            )
+        st.dataframe(pd.DataFrame(worked_rows), hide_index=True, use_container_width=True)
+
+    st.markdown("**What needs review**")
+    needs_review_rows = []
+    icr_records = extracted_with_readiness[
+        extracted_with_readiness.get("program_name", pd.Series("", index=extracted_with_readiness.index)).astype(str).str.contains(
+            "International Carbon Registry|ICR",
+            case=False,
+            na=False,
+        )
+    ]
+    if not icr_records.empty:
+        needs_review_rows.append(
+            {
+                "Source": "International Carbon Registry / ICR",
+                "Records": len(icr_records),
+                "Interpretation": "M-ICR codes and detail URLs discovered, but titles may require manual review.",
+                "Recommended next action": "Treat as discovery records until titles are verified.",
+            }
+        )
+    other_needs = extracted_with_readiness[
+        extracted_with_readiness["record_readiness"].eq("needs_research")
+        & ~extracted_with_readiness.index.isin(icr_records.index)
+    ]
+    for source_name, group in other_needs.groupby("program_name", dropna=False):
+        needs_review_rows.append(
+            {
+                "Source": normalize_text(source_name) or "Unknown source",
+                "Records": len(group),
+                "Interpretation": "Partial or uncertain extracted records.",
+                "Recommended next action": "Review titles, status, version, and source evidence before export.",
+            }
+        )
+    if needs_review_rows:
+        st.dataframe(pd.DataFrame(needs_review_rows), hide_index=True, use_container_width=True)
+    else:
+        st.info("No partial or uncertain extracted records are visible in the current output.")
+
+    st.markdown("**What could not be accessed**")
+    if errors.empty:
+        st.info("No source-access or extraction errors were logged in the current output.")
+    else:
+        access_rows = []
+        for source_name, group in errors.groupby("program_name", dropna=False):
+            source_text = normalize_text(source_name)
+            if "Asia Carbon Institute" in source_text:
+                interpretation = "SSL/source-access issue logged; not treated as methodology extraction failure."
+                action = "Open manually in browser or retry later; do not bypass SSL by default."
+            else:
+                interpretation = "Source fetch or extraction issue logged."
+                action = "Review the source URL and retry when appropriate."
+            access_rows.append(
+                {
+                    "Source": source_text or "Unknown source",
+                    "Issues": len(group),
+                    "Interpretation": interpretation,
+                    "Recommended next action": action,
+                }
+            )
+        st.dataframe(pd.DataFrame(access_rows), hide_index=True, use_container_width=True)
+
+    st.markdown("**What was separated out**")
+    separated_rows = pd.DataFrame(
+        [
+            {"Separated type": "Supporting documents", "Rows": count_value(candidates, "candidate_type", "supporting_document")},
+            {"Separated type": "Development pages", "Rows": count_value(candidates, "candidate_type", "development_page")},
+            {"Separated type": "Navigation links", "Rows": count_value(candidates, "candidate_type", "navigation_link")},
+            {"Separated type": "Excluded rows", "Rows": count_value(candidates, "candidate_type", "exclude")},
+        ]
+    )
+    st.write(
+        "These links are preserved for audit and follow-up, but they are not treated as methodology/protocol records."
+    )
+    st.dataframe(separated_rows, hide_index=True, use_container_width=True)
+
+    with st.expander("Detailed extraction diagnostics", expanded=False):
+        methodunit_rows = extracted_records
+        missing_title = methodunit_rows[
+            methodunit_rows.get("methodunit_name", pd.Series("", index=methodunit_rows.index)).astype(str).str.strip().isin(["", "Title requires review"])
+        ]
+        missing_status = methodunit_rows[
+            methodunit_rows.get("status", pd.Series("", index=methodunit_rows.index)).astype(str).str.strip().eq("")
+        ]
+        metric_row(
+            [
+                ("Development pages", count_value(candidates, "candidate_type", "development_page")),
+                ("Navigation links", count_value(candidates, "candidate_type", "navigation_link")),
+                ("Excluded rows", count_value(candidates, "candidate_type", "exclude")),
+                ("Table-derived records", count_value(methodunit_rows, "extraction_method", "table_parse")),
+            ]
+        )
+        metric_row(
+            [
+                ("Link-derived records", count_value(methodunit_rows, "extraction_method", "link_parse")),
+                ("Records missing title", len(missing_title)),
+                ("Records missing status", len(missing_status)),
+                ("ICR suspicious titles rejected", int(enrichment_metrics.get("icr_suspicious_titles_rejected", 0) or 0)),
+            ]
+        )
+        metric_row(
+            [
+                ("CFC document links found", int(enrichment_metrics.get("cfc_document_links_found", 0) or 0)),
+                ("CFC supporting links found", int(enrichment_metrics.get("cfc_supporting_links_found", 0) or 0)),
+                ("CFC records missing version", int(enrichment_metrics.get("cfc_records_missing_version", 0) or 0)),
+            ]
+        )
+
+    st.subheader("Extracted Records Preview")
+    if extracted_records.empty:
+        st.warning("No extracted methodology/protocol records were found in this run.")
+    else:
+        preview_columns = [
+            "program_name",
+            "methodunit_code",
+            "methodunit_name",
+            "unit_type",
+            "status",
+            "document_url",
+            "confidence",
+            "review_status",
+            "record_readiness",
+        ]
+        show_dataframe(select_existing(extracted_with_readiness.head(10), preview_columns), "demo_extracted_records", height=260)
+        st.download_button(
+            "Download extracted records CSV",
+            data=as_csv_download(select_existing(extracted_records, CANDIDATE_SCHEMA)),
+            file_name="methodunit_candidates_review.csv",
+            mime="text/csv",
+            key="demo_download_records",
+        )
+
+    st.subheader("Supporting Links Preview")
+    if supporting_links.empty:
+        st.info("No supporting links were separated in this run.")
+    else:
+        preview_columns = [
+            "program_name",
+            "methodunit_name",
+            "candidate_type",
+            "classification_reason",
+            "document_url",
+            "notes",
+        ]
+        show_dataframe(select_existing(supporting_links.head(10), preview_columns), "demo_supporting_links", height=260)
+        st.download_button(
+            "Download supporting links CSV",
+            data=as_csv_download(select_existing(supporting_links, CANDIDATE_SCHEMA)),
+            file_name="extracted_source_links_full.csv",
+            mime="text/csv",
+            key="demo_download_links",
+        )
+
+    if not errors.empty:
+        st.subheader("Issues Found")
+        show_dataframe(select_existing(errors, EXTRACTION_ERROR_SCHEMA), "demo_extraction_errors", height=220)
 
 
 def interpreting_outputs_page(data: dict[str, pd.DataFrame]) -> None:
@@ -2429,7 +2972,7 @@ def next_actions_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def live_source_check_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Live Source Check")
+    st.header("Step 1: Check source access")
     page_summary(PAGE_SUMMARIES["live_check"])
     if not require_rows(data["source_profiles"], "source profiles"):
         return
@@ -2553,7 +3096,7 @@ def live_source_check_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Source-Specific Extraction")
+    st.header("Step 2: Extract methodology records")
     page_summary(PAGE_SUMMARIES["candidate_extraction"])
     if not require_rows(data["source_profiles"], "source profiles"):
         return
@@ -2564,7 +3107,7 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
     )
     st.caption(
         "Supported in this prototype: Climate Action Reserve, International Carbon Registry / ICR, "
-        "and Asia Carbon Institute. These source-specific extractors fetch only the selected public listing pages and "
+        "Asia Carbon Institute, and City Forest Credits. These source-specific extractors fetch only the selected public listing pages and "
         "collect candidate links or table rows; linked PDFs are not fetched."
     )
 
@@ -2576,7 +3119,7 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
         "Supported source-specific extractors",
         SUPPORTED_EXTRACTORS,
         default=SUPPORTED_EXTRACTORS,
-        help="Only these first three public-source extractors are enabled.",
+        help="Only these controlled public-source extractors are enabled.",
     )
     allow_insecure_ssl = st.checkbox(
         "Allow insecure SSL for analyst testing",
@@ -2599,7 +3142,9 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
         st.session_state["candidate_extraction_enrichment_metrics"] = enrichment_metrics
         st.session_state["candidate_extraction_sources_attempted"] = len(selected_extractors)
 
-    candidates = st.session_state.get("candidate_extraction_results", pd.DataFrame(columns=CANDIDATE_SCHEMA))
+    candidates = apply_output_safeguards(
+        st.session_state.get("candidate_extraction_results", pd.DataFrame(columns=CANDIDATE_SCHEMA))
+    )
     errors = st.session_state.get("candidate_extraction_errors", pd.DataFrame(columns=EXTRACTION_ERROR_SCHEMA))
     enrichment_metrics = st.session_state.get("candidate_extraction_enrichment_metrics", {})
     sources_attempted = st.session_state.get("candidate_extraction_sources_attempted", 0)
@@ -2610,6 +3155,37 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
     navigation_count = count_value(candidates, "candidate_type", "navigation_link")
     excluded_count = count_value(candidates, "candidate_type", "exclude")
     pending_review = count_value(candidates, "review_status", "pending_review")
+
+    if sources_attempted or not candidates.empty or not errors.empty:
+        st.subheader("Output Routing")
+        routing_rows = [
+            {
+                "Output": "Extracted records",
+                "Count": methodunit_count,
+                "Next tab": "Review Extracted Records",
+                "Purpose": "Review possible methodology/protocol records before catalogue export.",
+            },
+            {
+                "Output": "Supporting links",
+                "Count": len(candidates) - methodunit_count,
+                "Next tab": "Supporting Links",
+                "Purpose": "Audit useful links that were not treated as methodology records.",
+            },
+            {
+                "Output": "Errors / issues",
+                "Count": len(errors),
+                "Next tab": "Issues to Resolve",
+                "Purpose": "Resolve source-access or extraction issues.",
+            },
+            {
+                "Output": "Downloads / saved files",
+                "Count": methodunit_count + len(candidates) + len(errors),
+                "Next tab": "Export for Catalogue",
+                "Purpose": "Download or save review-ready CSV handoff files.",
+            },
+        ]
+        st.dataframe(pd.DataFrame(routing_rows), hide_index=True, use_container_width=True)
+
     metric_row(
         [
             ("Sources attempted", sources_attempted),
@@ -2655,6 +3231,16 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
             ("ICR titles still requiring review", int(enrichment_metrics.get("icr_titles_still_requiring_review", 0) or 0)),
             ("ICR fetch failures", int(enrichment_metrics.get("icr_fetch_failures", 0) or 0)),
             ("ICR suspicious titles rejected", int(enrichment_metrics.get("icr_suspicious_titles_rejected", 0) or 0)),
+        ]
+    )
+    st.caption("City Forest Credits document/protocol-family extraction")
+    metric_row(
+        [
+            ("CFC records found", int(enrichment_metrics.get("cfc_records_found", 0) or 0)),
+            ("CFC document links found", int(enrichment_metrics.get("cfc_document_links_found", 0) or 0)),
+            ("CFC supporting links found", int(enrichment_metrics.get("cfc_supporting_links_found", 0) or 0)),
+            ("CFC records missing version", int(enrichment_metrics.get("cfc_records_missing_version", 0) or 0)),
+            ("CFC fetch failures", int(enrichment_metrics.get("cfc_fetch_failures", 0) or 0)),
         ]
     )
 
@@ -2848,13 +3434,19 @@ def run_connectors_workflow_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Extract from Sources")
     page_summary("Check official source pages and run source-specific extraction logic for supported public sources.")
     st.info(
-        "Purpose: check official source pages and run source-specific extraction logic. A source-specific extractor is a small extractor designed for a specific source or source type. "
-        "Interpret outputs as provisional extraction evidence. Action: run pre-checks or extraction only for the supported sources shown here."
+        "Purpose: create the outputs used by the other Workbench tabs. Step 1 checks whether official source URLs are reachable. "
+        "Step 2 extracts possible methodology/protocol records and separates supporting links and issues. "
+        "A source-specific extractor is a small extractor designed for a specific source or source type."
     )
-    precheck_tab, extraction_tab = st.tabs(["Source Pre-Check", "Candidate Extraction"])
+    precheck_tab, extraction_tab = st.tabs(["Step 1: Check source access", "Step 2: Extract methodology records"])
     with precheck_tab:
+        st.write("Check whether official source URLs are reachable before deciding whether an extraction run is likely to work.")
         live_source_check_page(data)
     with extraction_tab:
+        st.write(
+            "Run extraction for supported public sources. The run creates extracted records, supporting links, and extraction issues "
+            "for the downstream Workbench tabs."
+        )
         candidate_extraction_page(data)
 
 
@@ -2866,6 +3458,10 @@ def candidate_review_page(data: dict[str, pd.DataFrame]) -> None:
         "Interpret rows as possible methodology/protocol records that still need human judgment. "
         "Action: filter candidates and assign a review decision for display/download."
     )
+    st.write(
+        "Records are grouped into usable records and review-needed records. High confidence means extraction quality, not final approval. "
+        "ICR records should be treated as discovery records unless the title is clean."
+    )
     session_candidates = current_methodunit_candidates()
     candidates, source_label = session_or_output(
         session_candidates,
@@ -2874,24 +3470,27 @@ def candidate_review_page(data: dict[str, pd.DataFrame]) -> None:
         CANDIDATE_SCHEMA,
     )
 
-    uploaded = st.file_uploader("Upload Candidate MethodUnit CSV", type=["csv"], key="candidate_review_upload")
-    if uploaded is not None:
-        try:
-            candidates = ensure_columns(normalize_columns(pd.read_csv(uploaded, dtype=str).fillna("")), CANDIDATE_SCHEMA)
-            source_label = "uploaded CSV"
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"Could not read uploaded CSV: {exc}")
+    with st.expander("Advanced: load records from CSV", expanded=False):
+        st.write("Use this only when manually reviewing an exported candidate CSV outside the latest extraction run.")
+        uploaded = st.file_uploader("Upload extracted records CSV", type=["csv"], key="candidate_review_upload")
+        if uploaded is not None:
+            try:
+                candidates = ensure_columns(normalize_columns(pd.read_csv(uploaded, dtype=str).fillna("")), CANDIDATE_SCHEMA)
+                source_label = "uploaded CSV"
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Could not read uploaded CSV: {exc}")
+    candidates = add_record_readiness(candidates)
 
     st.caption(f"Review queue source: {source_label}")
     if candidates.empty:
-        st.info("No extracted records are available. Extract from Sources, upload a CSV, or place outputs/methodunit_candidates_review.csv in the project.")
+        st.info("No extracted records are loaded yet. Go to Extract from Sources and run Climate Action Reserve or City Forest Credits.")
         return
 
     if "candidate_type" in candidates.columns:
         candidates = candidates[candidates["candidate_type"].eq("methodunit_candidate") | candidates["candidate_type"].eq("")]
     filtered = inline_filters(
         candidates,
-        ["program_name", "confidence", "status", "review_status"],
+        ["program_name", "record_readiness", "confidence", "status", "review_status"],
         "candidate_review",
     )
     decision = st.selectbox(
@@ -2912,6 +3511,7 @@ def candidate_review_page(data: dict[str, pd.DataFrame]) -> None:
         "status",
         "source_url",
         "document_url",
+        "record_readiness",
         "confidence",
         "review_status",
         "review_decision",
@@ -2924,9 +3524,8 @@ def evidence_links_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Supporting Links")
     page_summary("Useful links found during extraction that are preserved separately from extracted methodology records.")
     st.info(
-        "Purpose: preserve useful links found during extraction that are not necessarily methodology records. "
-        "Examples include PDFs, FAQs, templates, guidance pages, development pages, navigation links, and excluded links. "
-        "Action: use filters to understand why links were classified or excluded."
+        "These links are produced by Extract from Sources. They are useful context, but they are not treated as methodology records. "
+        "Examples include PDFs, FAQs, templates, guidance pages, development pages, navigation links, and excluded links."
     )
     links, source_label = session_or_output(
         current_extracted_links(),
@@ -2934,9 +3533,20 @@ def evidence_links_page(data: dict[str, pd.DataFrame]) -> None:
         "extracted_source_links_full",
         CANDIDATE_SCHEMA,
     )
-    st.caption(f"Supporting link source: {source_label}")
+    with st.expander("Advanced: load supporting links from CSV", expanded=False):
+        st.write("Use this only when manually reviewing an exported full links CSV outside the latest extraction run.")
+        uploaded = st.file_uploader("Upload supporting links CSV", type=["csv"], key="supporting_links_upload")
+        if uploaded is not None:
+            try:
+                links = apply_output_safeguards(
+                    ensure_columns(normalize_columns(pd.read_csv(uploaded, dtype=str).fillna("")), CANDIDATE_SCHEMA)
+                )
+                source_label = "uploaded CSV"
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Could not read uploaded CSV: {exc}")
+    st.caption(f"Current data source: {source_label}")
     if links.empty:
-        st.info("No Supporting Links are available. Extract from Sources or place outputs/extracted_source_links_full.csv in the project.")
+        st.info("No supporting links are loaded yet. Run extraction first.")
         return
     filtered = inline_filters(
         links,
@@ -2950,8 +3560,8 @@ def qa_exceptions_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Issues to Resolve")
     page_summary("Broken URLs, SSL problems, stale links, duplicate risks, missing titles, and other review issues.")
     st.info(
-        "Purpose: collect broken URLs, SSL problems, stale links, duplicate risks, missing titles, and other review issues. "
-        "Source-access failures are useful findings, not just app errors. Action: resolve, retry, or document issues before Export for Catalogue."
+        "These issues are produced by source checks and extraction runs. Source-access failures are useful findings, not just app errors. "
+        "Use this tab to resolve, retry, or document issues before Export for Catalogue."
     )
 
     st.subheader("Data-Quality Issues")
@@ -2979,6 +3589,7 @@ def qa_exceptions_page(data: dict[str, pd.DataFrame]) -> None:
     if errors.empty:
         st.info("No extraction errors are available.")
     else:
+        st.write("These errors come from the latest extraction run or the latest saved extraction error output.")
         show_dataframe(errors, "qa_exceptions_extraction_errors", height=240)
 
     st.subheader("Review-Needed Records")
@@ -2986,6 +3597,7 @@ def qa_exceptions_page(data: dict[str, pd.DataFrame]) -> None:
     if not review_needed.empty:
         review_needed = review_needed[
             review_needed.get("review_status", pd.Series("", index=review_needed.index)).astype(str).str.lower().eq("pending_review")
+            | review_needed.get("review_status", pd.Series("", index=review_needed.index)).astype(str).str.lower().eq("needs_research")
             | review_needed.get("methodunit_name", pd.Series("", index=review_needed.index)).astype(str).eq("Title requires review")
         ]
     if review_needed.empty:
@@ -3003,11 +3615,34 @@ def export_page(data: dict[str, pd.DataFrame]) -> None:
         "Action: download individual CSVs or save timestamped outputs locally."
     )
 
-    methodunits = current_methodunit_candidates()
-    links = current_extracted_links()
-    errors = current_extraction_errors()
+    methodunits, methodunit_source = session_or_output(
+        current_methodunit_candidates(),
+        "methodunit_candidates_review.csv",
+        "methodunit_candidates_review",
+        CANDIDATE_SCHEMA,
+    )
+    links, links_source = session_or_output(
+        current_extracted_links(),
+        "extracted_source_links_full.csv",
+        "extracted_source_links_full",
+        CANDIDATE_SCHEMA,
+    )
+    errors, errors_source = session_or_output(
+        current_extraction_errors(),
+        "extraction_errors.csv",
+        "extraction_errors",
+        EXTRACTION_ERROR_SCHEMA,
+    )
     source_registry = data.get("source_profiles", pd.DataFrame())
     qa = data.get("qa_flags", pd.DataFrame())
+    st.caption(
+        f"Export sources: records = {methodunit_source}; supporting links = {links_source}; extraction errors = {errors_source}."
+    )
+
+    if methodunits.empty and links.empty and errors.empty:
+        st.info(
+            "No extraction output is available yet. Open Workbench -> Extract from Sources, or run a quick Demo, before returning here to export."
+        )
 
     downloads = [
         ("Current extracted methodology records", methodunits, "methodunit_candidates_review.csv"),
@@ -3038,6 +3673,45 @@ def export_page(data: dict[str, pd.DataFrame]) -> None:
             st.warning("No non-empty outputs were available to save.")
 
 
+def workbench_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Workbench")
+    page_summary("The operational layer for inspecting sources, running extraction, reviewing records, resolving issues, and preparing exports.")
+    st.info(
+        "Use this page after the demo. Extract from Sources creates the latest outputs used by Review Extracted Records, Supporting Links, Issues to Resolve, and Export for Catalogue."
+    )
+    st.markdown("**Choose sources -> check access -> extract records -> review records/supporting links/issues -> export**")
+    st.write(
+        "Review Extracted Records, Supporting Links, and Issues to Resolve read from the latest extraction run first, then from saved outputs if no run is loaded. "
+        "A quick demo run also populates the same latest extraction state used by these tabs."
+    )
+
+    tabs = st.tabs(
+        [
+            "Source Registry",
+            "Extract from Sources",
+            "Review Extracted Records",
+            "Supporting Links",
+            "Issues to Resolve",
+            "Export for Catalogue",
+            "How to Read Outputs",
+        ]
+    )
+    with tabs[0]:
+        source_registry_workflow_page(data)
+    with tabs[1]:
+        run_connectors_workflow_page(data)
+    with tabs[2]:
+        candidate_review_page(data)
+    with tabs[3]:
+        evidence_links_page(data)
+    with tabs[4]:
+        qa_exceptions_page(data)
+    with tabs[5]:
+        export_page(data)
+    with tabs[6]:
+        interpreting_outputs_page(data)
+
+
 def strategy_notes_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Roadmap")
     page_summary("Extraction strategy, extraction waves, and methodology rationale behind the SourceOps workflow.")
@@ -3049,6 +3723,41 @@ def strategy_notes_page(data: dict[str, pd.DataFrame]) -> None:
         "Expansion should follow the Coverage Plan waves. The right next step is not a one-shot scrape; it is to classify each source, "
         "check URL readiness, choose an extraction strategy, and route outputs through review before catalogue export."
     )
+    st.subheader("Roadmap Summary")
+    roadmap_rows = [
+        {
+            "Stage": "Implemented now",
+            "Focus": "Climate Action Reserve, City Forest Credits, ICR discovery, ACI exception handling",
+            "Outcome": "Small source-to-export loop with review-ready records, supporting links, and logged issues.",
+        },
+        {
+            "Stage": "Next sources",
+            "Focus": "Plan Vivo and Climate Forward, then ACR after URL validation",
+            "Outcome": "Extend the working patterns without broad scraping.",
+        },
+        {
+            "Stage": "Later document parsing",
+            "Focus": "Controlled PDF metadata and document-family extraction",
+            "Outcome": "Richer version, status, and evidence fields for PDF-first sources.",
+        },
+        {
+            "Stage": "Later portal handling",
+            "Focus": "Browser automation for JS-heavy sources such as Verra, Gold Standard, Isometric, and Puro Earth",
+            "Outcome": "Source-specific extractors only after official access patterns are understood.",
+        },
+        {
+            "Stage": "Later AI assistance",
+            "Focus": "Bounded extraction review, source-change summaries, duplicate detection, and reviewer notes",
+            "Outcome": "Faster human review without treating AI output as automatic approval.",
+        },
+        {
+            "Stage": "Later persistence",
+            "Focus": "Persistent review decisions and catalogue import validation",
+            "Outcome": "Operational review workflow instead of session-only decisions.",
+        },
+    ]
+    st.dataframe(pd.DataFrame(roadmap_rows), hide_index=True, use_container_width=True)
+
     connector_tab, waves_tab, methodology_tab = st.tabs(["Extraction Strategy", "Extraction Waves", "Methodology Notes"])
     with connector_tab:
         connector_strategy_page(data)
@@ -3066,6 +3775,11 @@ def strategy_notes_page(data: dict[str, pd.DataFrame]) -> None:
         st.write(
             "This upstream workbench prepares reviewed extracted methodology records, evidence URLs, source confidence, "
             "and issues to resolve so Dinesh's catalogue can ingest cleaner records with traceable provenance."
+        )
+        st.subheader("Next Recommended Sources")
+        st.write(
+            "After City Forest Credits, the next recommended sources are Plan Vivo and Climate Forward. "
+            "Plan Vivo extends the document/protocol-family pattern, while Climate Forward is a smaller catalogue-style source suitable for a controlled extractor."
         )
 
 
@@ -3118,43 +3832,19 @@ def main() -> None:
     page = st.sidebar.radio(
         "Pages",
         [
-            "Start Here",
-            "Extraction Strategies",
-            "Current Capabilities",
+            "Demo: Source to Catalogue",
             "Coverage Plan",
-            "How to Read the Outputs",
-            "Source Registry",
-            "Extract from Sources",
-            "Review Extracted Records",
-            "Supporting Links",
-            "Issues to Resolve",
-            "Export for Catalogue",
+            "Workbench",
             "Roadmap",
         ],
     )
 
-    if page == "Start Here":
-        start_here_page(data)
-    elif page == "Extraction Strategies":
-        extraction_strategies_page(data)
-    elif page == "Current Capabilities":
-        current_capabilities_page(data)
+    if page == "Demo: Source to Catalogue":
+        demo_source_to_catalogue_page(data)
     elif page == "Coverage Plan":
         coverage_plan_page(data)
-    elif page == "How to Read the Outputs":
-        interpreting_outputs_page(data)
-    elif page == "Source Registry":
-        source_registry_workflow_page(data)
-    elif page == "Extract from Sources":
-        run_connectors_workflow_page(data)
-    elif page == "Review Extracted Records":
-        candidate_review_page(data)
-    elif page == "Supporting Links":
-        evidence_links_page(data)
-    elif page == "Issues to Resolve":
-        qa_exceptions_page(data)
-    elif page == "Export for Catalogue":
-        export_page(data)
+    elif page == "Workbench":
+        workbench_page(data)
     elif page == "Roadmap":
         strategy_notes_page(data)
 
