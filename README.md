@@ -38,6 +38,7 @@ Source Registry
 - **Start Here**: First-time reviewer briefing: problem, role of the app, pipeline, proof points, and current capability snapshot.
 - **Extraction Strategies**: Explains source archetypes and why one scraper is not enough.
 - **Current Capabilities**: Summarizes what works today and shows extractor status.
+- **Coverage Plan**: Converts the 61-source registry into a wave-based onboarding roadmap for the rest of the standards.
 - **How to Read the Outputs**: Defines extracted records, Supporting Links, Issues to Resolve, Review Queue, and Export for Catalogue.
 - **Source Registry**: Filterable source registry from `source_profiles_final_fixed.csv`.
 - **Extract from Sources**: Source pre-checks and supported source-specific extraction.
@@ -69,6 +70,31 @@ Source Registry
 - **Asia Carbon Institute**: blocked or source-exception-prone due to SSL/source access.
 
 Other sources are represented in the Source Registry and Roadmap but are not yet implemented as extractors.
+
+## Coverage Plan
+
+The Coverage Plan page answers the stakeholder question: "What about the rest of the standards?"
+
+Its purpose is to convert the Source Registry into a managed onboarding pipeline, not to automate all 61 sources blindly. Each source is assigned a derived planning category inside the app, such as:
+
+- working extractor;
+- ready for extraction;
+- needs URL repair;
+- needs document/PDF parsing;
+- needs adopted-method handling;
+- needs browser automation later;
+- needs manual investigation.
+
+The page also groups expansion into waves:
+
+1. Stabilize working extractors.
+2. Add reachable document-family sources.
+3. Add more catalogue-style sources.
+4. Handle adopted-method sources.
+5. Tackle complex/high-value sources.
+6. Resolve the long tail through manual investigation and periodic checks.
+
+This makes coverage expansion auditable: classify the source, check URL readiness, choose the extraction strategy, review outputs, then export to the catalogue.
 
 ## How to Read Confidence
 
@@ -119,7 +145,8 @@ The Export for Catalogue page can write timestamped files to `outputs/`, includi
 ## Next Development Priorities
 
 1. Repair or confirm stale Source Registry URLs before building more extractors.
-2. Add the next stable HTML catalogue extractor, likely ACR after URL repair.
-3. Add controlled PDF metadata extraction for document-first sources.
-4. Add persistent review decisions.
-5. Add catalogue import validation once the extracted-record schema stabilizes.
+2. Use Coverage Plan waves to pick the next extractor.
+3. Add the next stable HTML catalogue extractor, likely ACR after URL repair.
+4. Add controlled PDF metadata extraction for document-first sources.
+5. Add persistent review decisions.
+6. Add catalogue import validation once the extracted-record schema stabilizes.

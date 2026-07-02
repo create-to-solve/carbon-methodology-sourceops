@@ -1633,6 +1633,234 @@ def save_timestamped_outputs(data: dict[str, pd.DataFrame]) -> list[Path]:
     return saved_paths
 
 
+def text_blob(row: pd.Series, columns: list[str]) -> str:
+    return " ".join(str(row.get(column, "")) for column in columns).lower()
+
+
+def program_in(row: pd.Series, names: list[str]) -> bool:
+    program_name = str(row.get("program_name", "")).lower()
+    return any(name.lower() in program_name for name in names)
+
+
+def derive_onboarding_plan(profiles: pd.DataFrame) -> pd.DataFrame:
+    planned = profiles.copy()
+    if planned.empty:
+        return planned
+    for column in [
+        "program_name",
+        "method_source_url",
+        "official_website",
+        "connector_type",
+        "source_type",
+        "confidence",
+        "populated_source_status",
+        "automation_priority",
+        "notes",
+        "extraction_strategy",
+        "extraction_wave",
+    ]:
+        if column not in planned.columns:
+            planned[column] = ""
+
+    rows = []
+    live_checks = st.session_state.get("live_source_check_results", pd.DataFrame())
+    failed_urls = set()
+    if not live_checks.empty and "check_status" in live_checks.columns:
+        failed = live_checks[live_checks["check_status"].astype(str).str.upper().eq("FAILED")]
+        failed_urls = set(failed.get("source_url", pd.Series(dtype=str)).astype(str).str.lower())
+
+    for _, row in planned.iterrows():
+        combined = text_blob(row, ["program_name", "connector_type", "source_type", "notes", "extraction_strategy", "method_source_url"])
+        source_url = clean_url(row.get("method_source_url") or row.get("official_website"))
+        has_source_url = bool(source_url)
+        confidence = str(row.get("confidence", ""))
+        populated_status = str(row.get("populated_source_status", ""))
+
+        extraction_status = "not implemented"
+        category = "Ready for extraction"
+        wave = "Wave 3: Add more catalogue-style sources"
+        action = "Validate source URL, then design a small source-specific extractor."
+
+        if program_in(row, ["Climate Action Reserve"]):
+            extraction_status = "working extractor"
+            category = "Working extractor"
+            wave = "Wave 1: Stabilize working extractors"
+            action = "Keep CAR stable and use it as the structured-table reference pattern."
+        elif program_in(row, ["International Carbon Registry", "ICR"]):
+            extraction_status = "partial extractor: discovery-only"
+            category = "Working extractor"
+            wave = "Wave 1: Stabilize working extractors"
+            action = "Keep discovery-only until title review and detail-page enrichment are reliable."
+        elif program_in(row, ["Asia Carbon Institute"]):
+            extraction_status = "partial extractor: blocked/source exception"
+            category = "Working extractor"
+            wave = "Wave 1: Stabilize working extractors"
+            action = "Treat as source exception until SSL/source access is resolved; preserve adopted-method logic."
+        elif source_url and source_url.lower() in failed_urls:
+            extraction_status = "source URL failed live check"
+            category = "Needs URL repair"
+            wave = "Wave 3: Add more catalogue-style sources"
+            action = "Repair or replace the stale source URL before building extraction logic."
+        elif program_in(row, ["American Carbon Registry", "ACR"]):
+            extraction_status = "not implemented: URL readiness needs confirmation"
+            category = "Needs URL repair"
+            wave = "Wave 3: Add more catalogue-style sources"
+            action = "Confirm the current methodologies URL before adding the ACR extractor."
+        elif any(term in combined for term in ["js-heavy", "portal", "dynamic", "headless", "verra", "gold standard", "isometric", "riverse", "puro"]):
+            category = "Needs browser automation later"
+            wave = "Wave 5: Complex/high-value sources"
+            action = "Defer until a browser/API/network strategy is designed; do not treat as basic HTML scraping."
+        elif any(term in combined for term in ["adopted", "external", "cdm", "verra", "gold standard"]) or program_in(row, ["BioCarbon", "Cercarbono", "Social Carbon", "Global Carbon Council", "GCC"]):
+            category = "Needs adopted-method handling"
+            wave = "Wave 4: Handle adopted-method sources"
+            action = "Separate native methods from adopted external methods and preserve source references."
+        elif any(term in combined for term in ["pdf", "document", "guideline"]) or program_in(row, ["City Forest Credits", "Nori", "ART/TREES", "Peatland Code", "Plan Vivo"]):
+            category = "Needs document/PDF parsing"
+            wave = "Wave 2: Add reachable document-family sources"
+            action = "Start with document listing metadata; defer PDF content extraction to a controlled follow-up."
+        elif (
+            not has_source_url
+            or "low" in confidence.lower()
+            or "unresolved" in populated_status.lower()
+            or any(term in combined for term in ["unclear", "manual", "monitor", "no clear", "unresolved"])
+        ):
+            category = "Needs manual investigation"
+            wave = "Wave 6: Long-tail unresolved sources"
+            action = "Manually verify whether a methodology source exists and update the Source Registry."
+        elif any(term in combined for term in ["catalog", "catalogue", "html", "list", "methodologies"]):
+            category = "Ready for extraction"
+            wave = "Wave 3: Add more catalogue-style sources"
+            action = "Build a small HTML/catalogue extractor after confirming URL stability."
+
+        rows.append(
+            {
+                **row.to_dict(),
+                "current_source_url": source_url,
+                "current_extraction_status": extraction_status,
+                "onboarding_category": category,
+                "suggested_wave": wave,
+                "recommended_next_action": action,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def coverage_plan_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Coverage Plan")
+    page_summary("A practical onboarding roadmap for answering: What about the rest of the standards?")
+    profiles = data.get("source_profiles", pd.DataFrame())
+    if not require_rows(profiles, "Source Registry"):
+        return
+
+    st.write(
+        "The app currently proves the extraction workflow on a small number of sources. "
+        "The next challenge is scaling coverage across the remaining standards without turning the project into one generic scraper."
+    )
+    st.info(
+        "The goal is not to automate all 61 sources blindly. The goal is to convert the source registry into a managed onboarding pipeline."
+    )
+    st.write(
+        "Sources should be onboarded in waves based on source type, URL readiness, extraction difficulty, and business value."
+    )
+
+    plan = derive_onboarding_plan(profiles)
+    metric_row(
+        [
+            ("Total sources in registry", len(plan)),
+            ("Working or partial extractor", count_value(plan, "onboarding_category", "Working extractor")),
+            ("Ready for extraction", count_value(plan, "onboarding_category", "Ready for extraction")),
+            ("Needs URL repair", count_value(plan, "onboarding_category", "Needs URL repair")),
+        ]
+    )
+    metric_row(
+        [
+            ("Needs PDF/document parsing", count_value(plan, "onboarding_category", "Needs document/PDF parsing")),
+            ("Needs browser automation later", count_value(plan, "onboarding_category", "Needs browser automation later")),
+            ("Needs manual investigation", count_value(plan, "onboarding_category", "Needs manual investigation")),
+        ]
+    )
+
+    st.subheader("Onboarding Waves")
+    waves = pd.DataFrame(
+        [
+            {
+                "Wave": "Wave 1: Stabilize working extractors",
+                "Goal": "Make CAR solid, keep ICR discovery-only unless titles improve, keep ACI as source exception.",
+                "Source archetype": "Currently supported sources",
+                "Example sources": "CAR, ICR, ACI",
+                "Recommended next action": "Stabilize outputs, review edge cases, and keep exports reliable.",
+                "Expected output": "Reliable review queue and export.",
+            },
+            {
+                "Wave": "Wave 2: Add reachable document-family sources",
+                "Goal": "Add City Forest Credits or Nori-style sources.",
+                "Source archetype": "PDF/document-family",
+                "Example sources": "City Forest Credits, Nori, ART/TREES, Peatland Code, Plan Vivo",
+                "Recommended next action": "List document/protocol families first; defer PDF content parsing.",
+                "Expected output": "Document/protocol family candidates.",
+            },
+            {
+                "Wave": "Wave 3: Add more catalogue-style sources",
+                "Goal": "ACR, Climate Forward, BioCarbon Registry, Cercarbono where source URLs are valid.",
+                "Source archetype": "Catalogue-first HTML",
+                "Example sources": "ACR, Climate Forward, BioCarbon Registry, Cercarbono",
+                "Recommended next action": "Repair stale URLs, then parse code/title/status/detail URLs.",
+                "Expected output": "Code/title/status/detail URL candidates.",
+            },
+            {
+                "Wave": "Wave 4: Handle adopted-method sources",
+                "Goal": "Distinguish native methodologies from adopted CDM/Verra/GS methods.",
+                "Source archetype": "Adopted external methods",
+                "Example sources": "Asia Carbon Institute, BioCarbon Registry, Cercarbono, Social Carbon, GCC",
+                "Recommended next action": "Model native records separately from adopted-method references.",
+                "Expected output": "Native method records plus adopted-method references.",
+            },
+            {
+                "Wave": "Wave 5: Complex/high-value sources",
+                "Goal": "CDM, JCM, Verra, Gold Standard, Isometric, Puro Earth.",
+                "Source archetype": "Large catalogues, JS-heavy portals, complex registries",
+                "Example sources": "CDM, JCM, Verra, Gold Standard, Isometric, Puro Earth",
+                "Recommended next action": "Design source-specific extractors and freshness monitoring.",
+                "Expected output": "Larger-scale source-specific extractors and freshness monitoring.",
+            },
+            {
+                "Wave": "Wave 6: Long-tail unresolved sources",
+                "Goal": "Manual investigation and periodic checks.",
+                "Source archetype": "Unclear/no methodology page",
+                "Example sources": "Low-confidence and unresolved Source Registry entries",
+                "Recommended next action": "Confirm source status and decide monitor, manual, or skip.",
+                "Expected output": "Source status decisions and manual review notes.",
+            },
+        ]
+    )
+    st.dataframe(waves, hide_index=True, use_container_width=True)
+
+    st.subheader("Source-Level Coverage Plan")
+    filtered = inline_filters(
+        plan,
+        ["onboarding_category", "suggested_wave", "connector_type", "confidence", "populated_source_status"],
+        "coverage_plan",
+    )
+    display_columns = [
+        "program_name",
+        "current_source_url",
+        "connector_type",
+        "current_extraction_status",
+        "onboarding_category",
+        "suggested_wave",
+        "recommended_next_action",
+        "confidence",
+        "notes",
+    ]
+    show_dataframe(select_existing(filtered, display_columns), "coverage_plan", height=520)
+
+    st.info(
+        "If asked whether the rest can be done: yes, but in waves. Each source should first be classified, checked, "
+        "assigned an extraction strategy, and routed through review before catalogue export."
+    )
+
+
 def start_here_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Start Here")
     page_summary("Use this page first. It explains the problem, the SourceOps role, the operating pipeline, and what the prototype proves today.")
@@ -2815,7 +3043,11 @@ def strategy_notes_page(data: dict[str, pd.DataFrame]) -> None:
     page_summary("Extraction strategy, extraction waves, and methodology rationale behind the SourceOps workflow.")
     st.info(
         "Purpose: explain design choices and future roadmap. Interpret this as strategy context for why different sources need different extraction approaches. "
-        "Action: use it to prioritize the next source-specific extractor and explain the workflow to stakeholders."
+        "Action: use Coverage Plan to expand in waves, then use this page to explain the source strategy and priorities."
+    )
+    st.write(
+        "Expansion should follow the Coverage Plan waves. The right next step is not a one-shot scrape; it is to classify each source, "
+        "check URL readiness, choose an extraction strategy, and route outputs through review before catalogue export."
     )
     connector_tab, waves_tab, methodology_tab = st.tabs(["Extraction Strategy", "Extraction Waves", "Methodology Notes"])
     with connector_tab:
@@ -2889,6 +3121,7 @@ def main() -> None:
             "Start Here",
             "Extraction Strategies",
             "Current Capabilities",
+            "Coverage Plan",
             "How to Read the Outputs",
             "Source Registry",
             "Extract from Sources",
@@ -2906,6 +3139,8 @@ def main() -> None:
         extraction_strategies_page(data)
     elif page == "Current Capabilities":
         current_capabilities_page(data)
+    elif page == "Coverage Plan":
+        coverage_plan_page(data)
     elif page == "How to Read the Outputs":
         interpreting_outputs_page(data)
     elif page == "Source Registry":
