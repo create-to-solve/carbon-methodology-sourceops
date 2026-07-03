@@ -3823,30 +3823,465 @@ def about_page() -> None:
     )
 
 
+def render_result_interpretation(candidates: pd.DataFrame, errors: pd.DataFrame) -> None:
+    if candidates.empty and errors.empty:
+        return
+    extracted_records = candidates[
+        candidates.get("candidate_type", pd.Series(dtype=str)).eq("methodunit_candidate")
+    ].copy()
+    supporting_links = candidates[
+        ~candidates.get("candidate_type", pd.Series(dtype=str)).eq("methodunit_candidate")
+    ].copy()
+    extracted_with_readiness = add_record_readiness(extracted_records)
+    issues_attention = (
+        len(errors)
+        + count_value(extracted_with_readiness, "record_readiness", "needs_research")
+        + count_value(extracted_with_readiness, "record_readiness", "source_issue")
+    )
+
+    metric_row(
+        [
+            ("Extracted methodology/protocol records", len(extracted_records)),
+            ("Supporting links separated", len(supporting_links)),
+            ("Issues requiring attention", issues_attention),
+            ("Errors logged", len(errors)),
+        ]
+    )
+
+    st.markdown("**What worked**")
+    ready_records = extracted_with_readiness[extracted_with_readiness["record_readiness"].eq("ready_for_review")]
+    if ready_records.empty:
+        st.info("No ready-for-review methodology/protocol records were produced in the current output.")
+    else:
+        worked_rows = []
+        for source_name, group in ready_records.groupby("program_name", dropna=False):
+            source_text = normalize_text(source_name)
+            if "Climate Action Reserve" in source_text:
+                interpretation = "structured-table extraction working"
+                action = "ready for review/export"
+            elif "City Forest Credits" in source_text:
+                interpretation = "document/protocol-family discovery working"
+                action = "review document titles and versions"
+            else:
+                interpretation = "source-specific extraction produced usable records"
+                action = "review and prepare for catalogue export"
+            worked_rows.append(
+                {
+                    "Source": source_text or "Unknown source",
+                    "Extracted records": len(group),
+                    "Interpretation": interpretation,
+                    "Recommended next action": action,
+                }
+            )
+        st.dataframe(pd.DataFrame(worked_rows), hide_index=True, use_container_width=True)
+
+    st.markdown("**What needs review**")
+    needs_review_rows = []
+    icr_records = extracted_with_readiness[
+        extracted_with_readiness.get("program_name", pd.Series("", index=extracted_with_readiness.index)).astype(str).str.contains(
+            "International Carbon Registry|ICR", case=False, na=False,
+        )
+    ]
+    if not icr_records.empty:
+        needs_review_rows.append(
+            {
+                "Source": "International Carbon Registry / ICR",
+                "Records": len(icr_records),
+                "Interpretation": "M-ICR codes and detail URLs discovered, but titles may require manual review.",
+                "Recommended next action": "Treat as discovery records until titles are verified.",
+            }
+        )
+    other_needs = extracted_with_readiness[
+        extracted_with_readiness["record_readiness"].eq("needs_research")
+        & ~extracted_with_readiness.index.isin(icr_records.index)
+    ]
+    for source_name, group in other_needs.groupby("program_name", dropna=False):
+        needs_review_rows.append(
+            {
+                "Source": normalize_text(source_name) or "Unknown source",
+                "Records": len(group),
+                "Interpretation": "Partial or uncertain extracted records.",
+                "Recommended next action": "Review titles, status, version, and source evidence before export.",
+            }
+        )
+    if needs_review_rows:
+        st.dataframe(pd.DataFrame(needs_review_rows), hide_index=True, use_container_width=True)
+    else:
+        st.info("No partial or uncertain extracted records are visible in the current output.")
+
+    st.markdown("**What could not be accessed**")
+    if errors.empty:
+        st.info("No source-access or extraction errors were logged in the current output.")
+    else:
+        access_rows = []
+        for source_name, group in errors.groupby("program_name", dropna=False):
+            source_text = normalize_text(source_name)
+            if "Asia Carbon Institute" in source_text:
+                interpretation = "SSL/source-access issue logged; not treated as methodology extraction failure."
+                action = "Open manually in browser or retry later; do not bypass SSL by default."
+            else:
+                interpretation = "Source fetch or extraction issue logged."
+                action = "Review the source URL and retry when appropriate."
+            access_rows.append(
+                {
+                    "Source": source_text or "Unknown source",
+                    "Issues": len(group),
+                    "Interpretation": interpretation,
+                    "Recommended next action": action,
+                }
+            )
+        st.dataframe(pd.DataFrame(access_rows), hide_index=True, use_container_width=True)
+
+    st.markdown("**What was separated out**")
+    separated_rows = pd.DataFrame(
+        [
+            {"Separated type": "Supporting documents", "Rows": count_value(candidates, "candidate_type", "supporting_document")},
+            {"Separated type": "Development pages", "Rows": count_value(candidates, "candidate_type", "development_page")},
+            {"Separated type": "Navigation links", "Rows": count_value(candidates, "candidate_type", "navigation_link")},
+            {"Separated type": "Excluded rows", "Rows": count_value(candidates, "candidate_type", "exclude")},
+        ]
+    )
+    st.dataframe(separated_rows, hide_index=True, use_container_width=True)
+
+
+def source_landscape_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Source Landscape")
+    page_summary("Map of the carbon methodology source universe — the programmes in the registry and the extraction archetype each one needs.")
+    st.write(
+        "Carbon methodology information is not published in one consistent format. "
+        "This page maps the source universe and groups standards by the type of extraction strategy they require."
+    )
+
+    profiles = data.get("source_profiles", pd.DataFrame())
+    if not require_rows(profiles, "source registry"):
+        return
+
+    plan = derive_onboarding_plan(profiles)
+
+    st.subheader("Source Universe Snapshot")
+    metric_row(
+        [
+            ("Total sources", len(plan)),
+            ("Working or partial extractor", count_value(plan, "onboarding_category", "Working extractor")),
+            ("Ready for extraction", count_value(plan, "onboarding_category", "Ready for extraction")),
+            ("Needs URL repair", count_value(plan, "onboarding_category", "Needs URL repair")),
+        ]
+    )
+    metric_row(
+        [
+            ("Needs PDF/document parsing", count_value(plan, "onboarding_category", "Needs document/PDF parsing")),
+            ("Needs browser automation later", count_value(plan, "onboarding_category", "Needs browser automation later")),
+            ("Needs manual investigation", count_value(plan, "onboarding_category", "Needs manual investigation")),
+        ]
+    )
+
+    st.subheader("Source Archetypes")
+    section_note("Each archetype needs a different extraction strategy. One generic scraper is not enough.")
+    archetype_rows = [
+        {"Source archetype": "Structured HTML table", "What it means": "Official methodology or protocol table on a public page.", "Example programmes": "Climate Action Reserve", "Extraction strategy": "Parse the official table, preserve source/detail links, classify rows.", "Current status": "Implemented for CAR"},
+        {"Source archetype": "Methodology catalogue with detail pages", "What it means": "Index page of methodology codes linking to per-methodology detail pages.", "Example programmes": "International Carbon Registry / ICR", "Extraction strategy": "Discover codes and detail URLs, then cautiously enrich from detail-page text.", "Current status": "Discovery-only; titles need review"},
+        {"Source archetype": "PDF / document family", "What it means": "Methodologies published as document / protocol families with links.", "Example programmes": "City Forest Credits, ART/TREES, C-Capsule", "Extraction strategy": "List document links first; parse PDFs later in a controlled workflow.", "Current status": "Implemented for CFC at document-link level"},
+        {"Source archetype": "Adopted external methods", "What it means": "Programmes that adopt CDM or other external methodologies.", "Example programmes": "Asia Carbon Institute, Social Carbon", "Extraction strategy": "Detect native vs adopted methods and preserve source references.", "Current status": "Partially implemented for ACI; source access can fail"},
+        {"Source archetype": "JS-heavy portal", "What it means": "Registries or portals that render content client-side.", "Example programmes": "Verra, Gold Standard, Isometric, Riverse", "Extraction strategy": "Use source-specific analysis later; not simple HTML scraping.", "Current status": "Not implemented"},
+        {"Source archetype": "No clear methodology page", "What it means": "Small or unresolved programmes without a public methodology index.", "Example programmes": "Small or unresolved programmes", "Extraction strategy": "Manual source profile, monitoring, and issue tracking.", "Current status": "Represented in the source registry and issues log"},
+    ]
+    st.dataframe(pd.DataFrame(archetype_rows), hide_index=True, use_container_width=True)
+
+    st.subheader("Source Registry")
+    section_note("Filter to see the current onboarding category, extraction status, and source pattern for each programme.")
+    filtered = inline_filters(
+        plan,
+        ["onboarding_category", "connector_type", "confidence", "populated_source_status", "suggested_wave"],
+        "landscape_registry",
+    )
+    display_columns = [
+        "program_name",
+        "current_source_url",
+        "connector_type",
+        "current_extraction_status",
+        "onboarding_category",
+        "suggested_wave",
+        "confidence",
+        "populated_source_status",
+        "notes",
+    ]
+    show_dataframe(select_existing(filtered, display_columns), "landscape_registry", height=460)
+
+    with st.expander("Advanced: Source Registry details", expanded=False):
+        source_registry_workflow_page(data)
+
+
+def ingestion_workflow_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Ingestion Workflow")
+    page_summary("The assembly line from official source to catalogue export — with the operational controls to run it.")
+    st.write(
+        "Source information moves through source access checks, source-specific extraction, "
+        "record classification, evidence capture, human review, and catalogue export. "
+        "This page shows the pipeline and lets you run each operational step."
+    )
+
+    st.subheader("Pipeline")
+    st.markdown(
+        "**Official source → source access check → source-specific extraction → "
+        "extracted methodology records → supporting links separated → issues logged → "
+        "human review → catalogue export**"
+    )
+
+    st.subheader("Stage Status")
+    section_note("Each stage has its own inputs, outputs, and current implementation state.")
+    stage_rows = [
+        {"Stage": "Source Registry", "What happens": "Maintain the official source map for each programme.", "Current implementation status": "Loaded from CSV", "Outputs produced": "Programme profiles, source URLs, extraction strategy notes"},
+        {"Stage": "Source Access Check", "What happens": "Verify whether official source pages are reachable and list candidate document links.", "Current implementation status": "Working", "Outputs produced": "Live source check results with status, links, and errors"},
+        {"Stage": "Source-Specific Extraction", "What happens": "Run source-specific ingestion logic for supported public sources.", "Current implementation status": "Working for CAR, CFC, ICR (discovery), ACI (source exception)", "Outputs produced": "Candidate MethodUnit rows and supporting links"},
+        {"Stage": "Record Classification", "What happens": "Classify each row as extracted record, supporting document, development page, navigation link, or excluded.", "Current implementation status": "Working", "Outputs produced": "candidate_type and classification_reason"},
+        {"Stage": "Evidence Capture", "What happens": "Preserve source URLs, detail URLs, and notes behind every extracted record.", "Current implementation status": "Working", "Outputs produced": "source_url, document_url, notes"},
+        {"Stage": "Human Review", "What happens": "Reviewer inspects extracted records, marks readiness, and decides next action.", "Current implementation status": "In-app review filters and decisions; not persisted", "Outputs produced": "record_readiness and review decision"},
+        {"Stage": "Catalogue Export", "What happens": "Download or timestamp-save review-ready CSV outputs.", "Current implementation status": "Working", "Outputs produced": "methodunit_candidates_review, extracted_source_links_full, extraction_errors"},
+        {"Stage": "Freshness Monitoring", "What happens": "Re-check source pages over time and detect changes.", "Current implementation status": "Roadmap", "Outputs produced": "Content hash and change tracking (planned)"},
+    ]
+    st.dataframe(pd.DataFrame(stage_rows), hide_index=True, use_container_width=True)
+
+    st.subheader("Run the Workflow")
+    st.caption(
+        "Quick Demo runs a one-source end-to-end extraction. Step 1 checks source access. "
+        "Step 2 runs the full set of supported source-specific extractors."
+    )
+    demo_tab, step1_tab, step2_tab = st.tabs(
+        ["Quick Demo", "Step 1: Source access check", "Step 2: Extract records"]
+    )
+    with demo_tab:
+        st.write(
+            "Run a small end-to-end extraction on a single source. "
+            "The outputs populate Evidence & Review just like a full extraction run."
+        )
+        demo_source = st.selectbox(
+            "Demo source",
+            ["Climate Action Reserve", "City Forest Credits"],
+            key="ingestion_quick_demo_source",
+        )
+        extractor_map = {
+            "Climate Action Reserve": extract_climate_action_reserve_candidates,
+            "City Forest Credits": extract_cfc_candidates,
+        }
+        if st.button("Run quick demo extraction", type="primary", key="ingestion_quick_demo_run"):
+            extractor = extractor_map[demo_source]
+            with st.spinner(f"Running {demo_source} extraction..."):
+                q_candidates, q_errors, q_metrics = normalize_demo_extraction_result(
+                    extractor(data.get("source_profiles", pd.DataFrame()))
+                )
+            st.session_state["candidate_extraction_results"] = q_candidates
+            st.session_state["candidate_extraction_errors"] = q_errors
+            st.session_state["candidate_extraction_enrichment_metrics"] = q_metrics
+            st.session_state["candidate_extraction_sources_attempted"] = 1
+            st.session_state["demo_source_last_run"] = demo_source
+            st.success(
+                f"Quick demo for {demo_source} finished. Open **Evidence & Review** to inspect the results."
+            )
+    with step1_tab:
+        live_source_check_page(data)
+    with step2_tab:
+        candidate_extraction_page(data)
+
+
+def coverage_progress_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Coverage Progress")
+    page_summary("Source-by-source implementation progress and onboarding waves.")
+    profiles = data.get("source_profiles", pd.DataFrame())
+    if not require_rows(profiles, "source registry"):
+        return
+
+    st.write(
+        "This page tracks source-by-source implementation progress. "
+        "The goal is not to scrape all standards blindly, but to onboard sources in waves based on readiness and extraction strategy."
+    )
+
+    plan = derive_onboarding_plan(profiles)
+
+    metric_row(
+        [
+            ("Working or partial extractors", count_value(plan, "onboarding_category", "Working extractor")),
+            ("Ready for extraction", count_value(plan, "onboarding_category", "Ready for extraction")),
+            ("Blocked / URL repair", count_value(plan, "onboarding_category", "Needs URL repair")),
+            ("Recommended next sources", 2),
+        ]
+    )
+    metric_row(
+        [
+            ("Needs document/PDF parsing", count_value(plan, "onboarding_category", "Needs document/PDF parsing")),
+            ("Needs browser automation later", count_value(plan, "onboarding_category", "Needs browser automation later")),
+            ("Needs manual investigation", count_value(plan, "onboarding_category", "Needs manual investigation")),
+        ]
+    )
+
+    st.subheader("Progress Tracker")
+    section_note("Focused view of sources with a known status today.")
+    tracker_rows = [
+        {"Programme / source": "Climate Action Reserve", "Current status": "working", "Extractor / source type": "structured HTML protocol table", "Current output": "extracted protocol records", "Issue / risk": "none material", "Recommended next action": "keep stable; use as reference pattern", "Suggested wave": "Wave 1"},
+        {"Programme / source": "City Forest Credits", "Current status": "working / partial", "Extractor / source type": "document / protocol-family links", "Current output": "protocol / standard document links", "Issue / risk": "PDF metadata not parsed", "Recommended next action": "review titles and versions; consider PDF parsing later", "Suggested wave": "Wave 2"},
+        {"Programme / source": "International Carbon Registry / ICR", "Current status": "partial / discovery", "Extractor / source type": "M-ICR codes and detail URLs", "Current output": "discovery records", "Issue / risk": "titles require manual review", "Recommended next action": "treat as discovery records; verify titles", "Suggested wave": "Wave 1"},
+        {"Programme / source": "Asia Carbon Institute", "Current status": "blocked / source access", "Extractor / source type": "adopted external methods", "Current output": "source-access error logged", "Issue / risk": "SSL / certificate issue", "Recommended next action": "manual check or retry; do not bypass SSL by default", "Suggested wave": "Wave 4"},
+        {"Programme / source": "Plan Vivo", "Current status": "recommended next", "Extractor / source type": "document / protocol-family", "Current output": "n/a", "Issue / risk": "document-first source", "Recommended next action": "extend the CFC pattern for document listing", "Suggested wave": "Wave 2"},
+        {"Programme / source": "Climate Forward", "Current status": "recommended next", "Extractor / source type": "catalogue-style HTML", "Current output": "n/a", "Issue / risk": "verify URL first", "Recommended next action": "build a small controlled extractor after URL check", "Suggested wave": "Wave 3"},
+        {"Programme / source": "American Carbon Registry (ACR)", "Current status": "URL repair first", "Extractor / source type": "catalogue-style HTML", "Current output": "n/a", "Issue / risk": "current URL not confirmed", "Recommended next action": "confirm or repair the source URL before building the extractor", "Suggested wave": "Wave 3"},
+    ]
+    st.dataframe(pd.DataFrame(tracker_rows), hide_index=True, use_container_width=True)
+
+    st.subheader("Onboarding Waves")
+    section_note("Waves group sources by readiness and extraction strategy.")
+    waves = pd.DataFrame(
+        [
+            {"Wave": "Wave 1: Stabilize working extractors", "Goal": "Make CAR solid, keep ICR discovery-only unless titles improve, keep ACI as source exception.", "Source archetype": "Currently supported sources", "Example sources": "CAR, ICR, ACI", "Recommended next action": "Stabilize outputs, review edge cases, keep exports reliable.", "Expected output": "Reliable review queue and export."},
+            {"Wave": "Wave 2: Add reachable document-family sources", "Goal": "Add City Forest Credits or Nori-style sources.", "Source archetype": "PDF / document family", "Example sources": "City Forest Credits, Nori, ART/TREES, Peatland Code, Plan Vivo", "Recommended next action": "List document / protocol families first; defer PDF content parsing.", "Expected output": "Document / protocol family candidates."},
+            {"Wave": "Wave 3: Add more catalogue-style sources", "Goal": "ACR, Climate Forward, BioCarbon Registry, Cercarbono where URLs are valid.", "Source archetype": "Catalogue-first HTML", "Example sources": "ACR, Climate Forward, BioCarbon Registry, Cercarbono", "Recommended next action": "Repair stale URLs, then parse code / title / status / detail URLs.", "Expected output": "Code / title / status / detail URL candidates."},
+            {"Wave": "Wave 4: Handle adopted-method sources", "Goal": "Distinguish native methodologies from adopted CDM / Verra / GS methods.", "Source archetype": "Adopted external methods", "Example sources": "Asia Carbon Institute, BioCarbon Registry, Cercarbono, Social Carbon, GCC", "Recommended next action": "Model native records separately from adopted-method references.", "Expected output": "Native method records plus adopted-method references."},
+            {"Wave": "Wave 5: Complex / high-value sources", "Goal": "CDM, JCM, Verra, Gold Standard, Isometric, Puro Earth.", "Source archetype": "Large catalogues, JS-heavy portals, complex registries", "Example sources": "CDM, JCM, Verra, Gold Standard, Isometric, Puro Earth", "Recommended next action": "Design source-specific extractors and freshness monitoring.", "Expected output": "Larger-scale source-specific extractors and freshness monitoring."},
+            {"Wave": "Wave 6: Long-tail unresolved sources", "Goal": "Manual investigation and periodic checks.", "Source archetype": "Unclear / no methodology page", "Example sources": "Low-confidence and unresolved source registry entries", "Recommended next action": "Confirm source status and decide monitor, manual, or skip.", "Expected output": "Source status decisions and manual review notes."},
+        ]
+    )
+    st.dataframe(waves, hide_index=True, use_container_width=True)
+
+    with st.expander("Advanced: Full source-level plan", expanded=False):
+        section_note("Every programme in the registry with its derived onboarding category and suggested wave.")
+        filtered = inline_filters(
+            plan,
+            ["onboarding_category", "suggested_wave", "connector_type", "confidence", "populated_source_status"],
+            "coverage_progress_full",
+        )
+        display_columns = [
+            "program_name",
+            "current_source_url",
+            "connector_type",
+            "current_extraction_status",
+            "onboarding_category",
+            "suggested_wave",
+            "recommended_next_action",
+            "confidence",
+            "notes",
+        ]
+        show_dataframe(select_existing(filtered, display_columns), "coverage_progress_full", height=520)
+
+    st.info(
+        "Coverage expansion should follow this wave order. Classify the source, check URL readiness, "
+        "choose an extraction strategy, then route outputs through review before catalogue export."
+    )
+
+
+def evidence_and_review_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Evidence & Review")
+    page_summary("Extracted records, supporting material, issues, and export — all read from the latest extraction outputs.")
+    st.write(
+        "This page shows what extraction produced and how records should be reviewed before catalogue export. "
+        "Extracted records are not automatically approved methodologies."
+    )
+
+    candidates = apply_output_safeguards(
+        st.session_state.get("candidate_extraction_results", pd.DataFrame(columns=CANDIDATE_SCHEMA))
+    )
+    errors = st.session_state.get("candidate_extraction_errors", pd.DataFrame(columns=EXTRACTION_ERROR_SCHEMA))
+    last_run = st.session_state.get("demo_source_last_run", "")
+
+    if candidates.empty and errors.empty:
+        st.info(
+            "No extraction outputs are loaded in this session. "
+            "Open **Ingestion Workflow → Quick Demo** or **Step 2: Extract records** to produce records, then return here."
+        )
+    else:
+        with st.expander("Result interpretation summary", expanded=True):
+            if last_run:
+                st.caption(f"Latest session run: {last_run}")
+            render_result_interpretation(candidates, errors)
+
+    tabs = st.tabs(["Extracted Records", "Supporting Material", "Issues", "Export"])
+    with tabs[0]:
+        candidate_review_page(data)
+    with tabs[1]:
+        evidence_links_page(data)
+    with tabs[2]:
+        qa_exceptions_page(data)
+    with tabs[3]:
+        export_page(data)
+
+
+def ai_assisted_scaling_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("AI-Assisted Scaling")
+    page_summary("How AI can assist review responsibly — bounded to evidence, not blindly scraping.")
+    st.info(
+        "No AI API is called yet. This page describes a roadmap for how AI can assist review tasks with clear evidence and human control."
+    )
+
+    st.write(
+        "Deterministic source checks and source-specific extractors remain the first layer. "
+        "AI is useful for ambiguous or messy cases where deterministic rules alone cannot decide."
+    )
+
+    st.subheader("Messy Cases and AI Assist Roles")
+    ai_rows = [
+        {"Messy case": "Messy PDF title / version", "Deterministic layer": "fetch / document metadata", "AI assist role": "extract title, version, and status from bounded text", "Required evidence": "text snippet with page reference", "Human review decision": "approve, edit, or reject"},
+        {"Messy case": "Ambiguous link classification", "Deterministic layer": "link text, URL, and surrounding context", "AI assist role": "classify methodology vs supporting doc vs exclude", "Required evidence": "link text and surrounding context", "Human review decision": "confirm category"},
+        {"Messy case": "ICR title problem", "Deterministic layer": "M-ICR code and detail URL", "AI assist role": "propose title only if supported by page text", "Required evidence": "exact text snippet from detail page", "Human review decision": "manual approval"},
+        {"Messy case": "Adopted CDM methods", "Deterministic layer": "detect references to CDM / Verra / GS", "AI assist role": "classify native vs adopted", "Required evidence": "source text reference", "Human review decision": "approve mapping"},
+        {"Messy case": "Duplicate / alias detection", "Deterministic layer": "fuzzy match and codes", "AI assist role": "suggest possible duplicate or alias", "Required evidence": "matching fields", "Human review decision": "merge or keep separate"},
+    ]
+    st.dataframe(pd.DataFrame(ai_rows), hide_index=True, use_container_width=True)
+
+    st.subheader("Future AI Workflow")
+    st.markdown(
+        "**Raw source text → AI suggestion with evidence → human approve / edit / reject → catalogue export**"
+    )
+    st.caption(
+        "The AI layer never replaces reviewer judgment; it surfaces a bounded suggestion with the evidence a reviewer needs to decide."
+    )
+
+    st.subheader("Future AI Task Output Schema")
+    schema_rows = [
+        {"Field": "task_id", "Description": "Unique identifier for the AI-assisted review task."},
+        {"Field": "program_name", "Description": "Programme the task belongs to."},
+        {"Field": "problem_type", "Description": "Which messy case this task addresses."},
+        {"Field": "raw_text_context", "Description": "Bounded text snippet the suggestion is derived from."},
+        {"Field": "current_extracted_fields", "Description": "Fields already extracted deterministically."},
+        {"Field": "ai_suggestion", "Description": "AI-proposed value or classification."},
+        {"Field": "evidence_text", "Description": "Exact text supporting the AI suggestion."},
+        {"Field": "confidence", "Description": "AI confidence for the suggestion."},
+        {"Field": "reviewer_decision", "Description": "Human reviewer approve / edit / reject outcome."},
+    ]
+    st.dataframe(pd.DataFrame(schema_rows), hide_index=True, use_container_width=True)
+
+    st.caption("This is a roadmap. No AI calls are made yet.")
+
+    st.subheader("Guardrails")
+    st.write("- AI assists bounded extraction and review, not blind scraping.")
+    st.write("- Every suggestion must carry its evidence snippet.")
+    st.write("- A human reviewer approves, edits, or rejects each suggestion before it reaches the catalogue.")
+    st.write("- Source-specific deterministic extractors remain the first layer.")
+
+
 def main() -> None:
     data = load_data()
     st.title(APP_TITLE)
 
-    st.sidebar.title("Navigation")
+    st.sidebar.title("Source Intelligence Control Room")
     sidebar_data_status(data)
     page = st.sidebar.radio(
         "Pages",
         [
-            "Demo: Source to Catalogue",
-            "Coverage Plan",
-            "Workbench",
-            "Roadmap",
+            "Source Landscape",
+            "Ingestion Workflow",
+            "Coverage Progress",
+            "Evidence & Review",
+            "AI-Assisted Scaling",
         ],
     )
 
-    if page == "Demo: Source to Catalogue":
-        demo_source_to_catalogue_page(data)
-    elif page == "Coverage Plan":
-        coverage_plan_page(data)
-    elif page == "Workbench":
-        workbench_page(data)
-    elif page == "Roadmap":
-        strategy_notes_page(data)
+    if page == "Source Landscape":
+        source_landscape_page(data)
+    elif page == "Ingestion Workflow":
+        ingestion_workflow_page(data)
+    elif page == "Coverage Progress":
+        coverage_progress_page(data)
+    elif page == "Evidence & Review":
+        evidence_and_review_page(data)
+    elif page == "AI-Assisted Scaling":
+        ai_assisted_scaling_page(data)
 
 
 if __name__ == "__main__":
