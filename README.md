@@ -1,6 +1,6 @@
 # Carbon Methodology SourceOps Workbench
 
-**Source Intelligence Control Room for carbon methodology ingestion.**
+**Carbon Methodology SourceOps Workbench for carbon methodology ingestion.**
 
 `Carbon Methodology SourceOps Workbench` is a local Streamlit prototype that maps the carbon methodology source universe, tracks extraction readiness, runs source-specific ingestion workflows, preserves evidence behind extracted records, and shows how AI can responsibly assist messy review tasks — without blindly scraping the web.
 
@@ -19,7 +19,7 @@ Carbon methodology information is scattered across heterogeneous official source
 ## App Pages
 
 1. **Source Landscape** — the source universe: total programmes, source archetypes, and the filterable source registry.
-2. **Ingestion Workflow** — the pipeline visual, stage status, and the operational controls (Quick Demo, Source Access Check, Extract Records).
+2. **Ingestion Workflow** — the pipeline visual, stage status, and the operational controls (Quick Demo, Source Access Check, Extract or Resolve Records, Source Resolution).
 3. **Coverage Progress** — source-by-source implementation status, recommended next sources, and onboarding waves.
 4. **Evidence & Review** — result interpretation summary, then tabs for Extracted Records, Supporting Material, Issues, and Export.
 5. **AI-Assisted Scaling** — messy-case catalogue, future AI workflow visual, future task output schema, and guardrails.
@@ -30,6 +30,7 @@ Carbon methodology information is scattered across heterogeneous official source
 Official source
 -> source access check
 -> source-specific extraction
+-> source resolution where needed
 -> extracted methodology records
 -> supporting links separated
 -> issues logged
@@ -48,14 +49,30 @@ Source-specific extractors are small, source-aware ingestion routines — not on
 
 Other programmes appear in the Source Landscape and Coverage Progress views but do not yet have implemented extractors.
 
+## Source Resolution
+
+Some standards do not publish a clean, dedicated methodologies section. Some have only one methodology-like document, some use a single standard PDF, some point to adopted methods, some require an access request, and some remain unresolved until an official platform is accessible.
+
+Source Resolution handles those cases before a normal extractor is designed. Valid outcomes include automated extraction, document-family capture, adopted-method pointer, access request, unresolved, or park.
+
+The current implemented example is **Artisan C-sink**:
+
+- no separate methodology index;
+- methodology information lives in the Global Artisan C-Sink Standard page/PDF plus clarification documents;
+- methodology model is a single protocol/document family;
+- recommended catalogue action is `capture-document-family`;
+- recommended ingestion mode is semi-automated extraction or one-shot manual capture.
+
+The app fetches only the public source page, does not parse full PDFs, creates one pending-review document-family record, preserves clarification documents as Supporting Material, and logs missing or unstable document links as Issues. This directly addresses standards with one or a few methodologies where a full catalogue scraper would be unnecessary.
+
 ## Session-State Model
 
-The app treats extraction as a producer step and everything downstream as consumers of the latest extraction outputs:
+The app treats extraction and source resolution as producer steps, and everything downstream as consumers of the latest outputs:
 
-- **Producers**: Quick Demo and Step 2: Extract records on the Ingestion Workflow page.
+- **Producers**: Quick Demo, Step 2: Extract or resolve records, and Source Resolution on the Ingestion Workflow page.
 - **Consumers**: Evidence & Review (Extracted Records, Supporting Material, Issues, Export).
 
-Both producers write to the same session-state keys (`candidate_extraction_results`, `candidate_extraction_errors`, `candidate_extraction_enrichment_metrics`, `candidate_extraction_sources_attempted`). Consumers read those same keys and fall back to the latest saved `outputs/` CSVs if no session data is loaded. A quick demo run therefore populates the same downstream tabs as a full extraction run.
+All producers write to the same session-state keys (`candidate_extraction_results`, `candidate_extraction_errors`, `candidate_extraction_enrichment_metrics`, `candidate_extraction_sources_attempted`). Consumers read those same keys and fall back to the latest saved `outputs/` CSVs if no session data is loaded. A quick demo run or Source Resolution run therefore populates the same downstream tabs as a full extraction run.
 
 ## Evidence and Review Rules
 

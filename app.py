@@ -80,6 +80,17 @@ EXTRACTION_ERROR_SCHEMA = [
     "suggested_action",
     "extracted_at",
 ]
+SOURCE_RESOLUTION_SCHEMA = [
+    "programme",
+    "dedicated_methodology_page",
+    "where_methodology_info_lives",
+    "methodology_model",
+    "recommended_catalogue_action",
+    "recommended_ingestion_mode",
+    "review_status",
+    "evidence_url",
+    "resolved_at",
+]
 ALLOWED_CANDIDATE_TYPES = [
     "methodunit_candidate",
     "supporting_document",
@@ -93,6 +104,7 @@ SUPPORTED_EXTRACTORS = [
     "Asia Carbon Institute",
     "City Forest Credits",
 ]
+ARTISAN_C_SINK_FALLBACK_SOURCE_URL = "https://www.carbon-standards.com/en/standards/service-505~global-artisan-c-sink.html"
 CODE_PATTERNS = {
     "icr": re.compile(r"\bM-ICR\s*\d{3,}\b", re.IGNORECASE),
     "cdm": re.compile(r"\b(?:ACM\d{4}|AM\d{4}|AMS[-\s][A-Z0-9.]+)\b", re.IGNORECASE),
@@ -378,6 +390,13 @@ def pretty_label(column: str) -> str:
         "error_type": "Error Type",
         "error_message": "Error Message",
         "suggested_action": "Suggested Action",
+        "dedicated_methodology_page": "Dedicated Methodology Page",
+        "where_methodology_info_lives": "Where Methodology Info Lives",
+        "methodology_model": "Methodology Model",
+        "recommended_catalogue_action": "Recommended Catalogue Action",
+        "recommended_ingestion_mode": "Recommended Ingestion Mode",
+        "evidence_url": "Evidence URL",
+        "resolved_at": "Resolved At",
     }
     return labels.get(column, column.replace("_", " ").title())
 
@@ -1604,6 +1623,190 @@ def extract_cfc_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = Fa
     return dedupe_candidates(candidates), "", metrics
 
 
+def first_url_from_text(value: str) -> str:
+    match = re.search(r"https?://[^\s,\"']+", str(value or ""))
+    return clean_url(match.group(0)) if match else ""
+
+
+def artisan_source_url(profile: dict) -> str:
+    for column in ["method_source_url", "official_website", "registry_url", "evidence_urls"]:
+        url = first_url_from_text(profile.get(column, ""))
+        if url and not is_pdf_or_document_url(url):
+            return url
+    return ARTISAN_C_SINK_FALLBACK_SOURCE_URL
+
+
+def is_artisan_standard_link(text: str, href: str) -> bool:
+    combined = f"{normalize_text(text)} {href}".lower()
+    return (
+        "artisan c-sink" in combined
+        and any(term in combined for term in ["standard", "guideline", "global-artisan-c-sink", "global artisan c-sink"])
+        and any(term in combined for term in [".pdf", ".doc", "download", "media"])
+    )
+
+
+def is_artisan_supporting_link(text: str, href: str) -> bool:
+    combined = f"{normalize_text(text)} {href}".lower()
+    return any(
+        term in combined
+        for term in [
+            "clarification",
+            "faq",
+            "guidance",
+            "document",
+            "form",
+            "annex",
+            "update",
+            "positive list",
+            "calculation",
+            "manual",
+            "template",
+        ]
+    )
+
+
+def check_document_link_issue(program_name: str, document_url: str, source_url: str) -> dict | None:
+    if not document_url:
+        return make_extraction_error(
+            program_name,
+            source_url,
+            "document_link_missing",
+            "No stable standard PDF/document link was found on the public source page.",
+            "Open the source page manually and capture a stable document URL before catalogue ingestion.",
+        )
+    if requests is None:
+        return None
+    try:
+        response = requests.head(
+            document_url,
+            headers={"User-Agent": POLITE_USER_AGENT},
+            allow_redirects=False,
+            timeout=SOURCE_CHECK_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException as exc:
+        return make_extraction_error(
+            program_name,
+            document_url,
+            "document_link_check_failed",
+            str(exc),
+            "Open the document link manually and confirm whether a stable PDF/document URL is available.",
+        )
+    if 300 <= response.status_code < 400:
+        return make_extraction_error(
+            program_name,
+            document_url,
+            "document_link_redirected",
+            f"Document link returned redirect status {response.status_code}.",
+            "Capture the final stable PDF/document URL before catalogue ingestion.",
+        )
+    if response.status_code >= 400:
+        return make_extraction_error(
+            program_name,
+            document_url,
+            "document_link_non_200_status",
+            f"Document link returned status {response.status_code}.",
+            "Find a working standard PDF/document URL or preserve this as a source issue.",
+        )
+    return None
+
+
+def resolve_artisan_c_sink_source(profiles: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    profile = get_program_profile(profiles, ["Artisan C-sink", "Artisan C-Sink"])
+    if not profile:
+        profile = {"program_id": "", "program_name": "Artisan C-sink"}
+    program_name = "Artisan C-sink"
+    source_url = artisan_source_url(profile)
+    resolved_at = datetime.now().isoformat(timespec="seconds")
+    resolution = {
+        "programme": program_name,
+        "dedicated_methodology_page": "Partial / No separate methodology index",
+        "where_methodology_info_lives": "standard PDF + clarification documents",
+        "methodology_model": "single protocol/document family",
+        "recommended_catalogue_action": "capture-document-family",
+        "recommended_ingestion_mode": "semi-automated extraction or one-shot manual capture",
+        "review_status": "pending_review",
+        "evidence_url": source_url,
+        "resolved_at": resolved_at,
+    }
+
+    response, error = fetch_public_source(source_url, program_name)
+    errors = []
+    if error:
+        resolution["review_status"] = "needs_research"
+        errors.append(error)
+        return (
+            pd.DataFrame([resolution], columns=SOURCE_RESOLUTION_SCHEMA),
+            pd.DataFrame(columns=CANDIDATE_SCHEMA),
+            pd.DataFrame([{column: row.get(column, "") for column in EXTRACTION_ERROR_SCHEMA} for row in errors], columns=EXTRACTION_ERROR_SCHEMA),
+        )
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    standard_document_url = ""
+    supporting_candidates = []
+    seen_links = set()
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor.get("href") or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        link_text = normalize_text(anchor.get_text(" ", strip=True))
+        document_url = urljoin(response.url, href)
+        link_key = document_url.lower()
+        if link_key in seen_links:
+            continue
+        seen_links.add(link_key)
+
+        if not standard_document_url and is_artisan_standard_link(link_text, href):
+            standard_document_url = document_url
+            continue
+
+        if is_artisan_supporting_link(link_text, href):
+            supporting = make_candidate(
+                profile,
+                "",
+                link_text or Path(urlparse(document_url).path).stem.replace("-", " ").replace("_", " "),
+                "supporting_link",
+                "",
+                extract_version(f"{link_text} {href}"),
+                "",
+                response.url,
+                document_url,
+                "source_resolution_link_parse",
+                "medium",
+                "Clarification or supporting document preserved during Artisan C-sink source resolution.",
+            )
+            supporting["candidate_type"] = "supporting_document"
+            supporting["classification_reason"] = "Artisan C-sink clarification/supporting document, not a methodology record."
+            supporting_candidates.append(supporting)
+
+    document_issue = check_document_link_issue(program_name, standard_document_url, response.url)
+    if document_issue:
+        errors.append(document_issue)
+
+    methodunit = make_candidate(
+        profile,
+        "",
+        "Global Artisan C-Sink Standard",
+        "Standard / Document family",
+        "",
+        "",
+        "pending/public source",
+        response.url,
+        standard_document_url,
+        "source_resolution_document_family",
+        "high" if standard_document_url and not document_issue else "medium",
+        "No separate methodology index; captured as document-family source resolution.",
+    )
+    methodunit["candidate_type"] = "methodunit_candidate"
+    methodunit["classification_reason"] = "No separate methodology index; standard treated as document-family MethodUnit candidate."
+
+    candidates = dedupe_candidates([methodunit, *supporting_candidates])
+    return (
+        pd.DataFrame([resolution], columns=SOURCE_RESOLUTION_SCHEMA),
+        apply_output_safeguards(pd.DataFrame([{column: candidate.get(column, "") for column in CANDIDATE_SCHEMA} for candidate in candidates], columns=CANDIDATE_SCHEMA)),
+        pd.DataFrame([{column: row.get(column, "") for column in EXTRACTION_ERROR_SCHEMA} for row in errors], columns=EXTRACTION_ERROR_SCHEMA),
+    )
+
+
 def run_candidate_extractors(
     selected_extractors: list[str],
     profiles: pd.DataFrame,
@@ -1924,6 +2127,11 @@ def derive_onboarding_plan(profiles: pd.DataFrame) -> pd.DataFrame:
             category = "Working extractor"
             wave = "Wave 1: Stabilize working extractors"
             action = "Use document/protocol-family extraction; full PDF parsing is not yet implemented."
+        elif program_in(row, ["Artisan C-sink", "Artisan C-Sink"]):
+            extraction_status = "source resolution implemented: document-family capture"
+            category = "Working extractor"
+            wave = "Wave 3: Add more catalogue-style sources"
+            action = "Capture as single standard/document-family record; review clarification documents and stable PDF URL."
         elif source_url and source_url.lower() in failed_urls:
             extraction_status = "source URL failed live check"
             category = "Needs URL repair"
@@ -3096,7 +3304,7 @@ def live_source_check_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Step 2: Extract methodology records")
+    st.header("Step 2: Extract or resolve records")
     page_summary(PAGE_SUMMARIES["candidate_extraction"])
     if not require_rows(data["source_profiles"], "source profiles"):
         return
@@ -3141,6 +3349,8 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
         st.session_state["candidate_extraction_errors"] = errors_df
         st.session_state["candidate_extraction_enrichment_metrics"] = enrichment_metrics
         st.session_state["candidate_extraction_sources_attempted"] = len(selected_extractors)
+        st.session_state["demo_source_last_run"] = "Source-specific extraction"
+        st.session_state["source_resolution_last_run"] = ""
 
     candidates = apply_output_safeguards(
         st.session_state.get("candidate_extraction_results", pd.DataFrame(columns=CANDIDATE_SCHEMA))
@@ -3438,7 +3648,7 @@ def run_connectors_workflow_page(data: dict[str, pd.DataFrame]) -> None:
         "Step 2 extracts possible methodology/protocol records and separates supporting links and issues. "
         "A source-specific extractor is a small extractor designed for a specific source or source type."
     )
-    precheck_tab, extraction_tab = st.tabs(["Step 1: Check source access", "Step 2: Extract methodology records"])
+    precheck_tab, extraction_tab = st.tabs(["Step 1: Check source access", "Step 2: Extract or resolve records"])
     with precheck_tab:
         st.write("Check whether official source URLs are reachable before deciding whether an extraction run is likely to work.")
         live_source_check_page(data)
@@ -3448,6 +3658,118 @@ def run_connectors_workflow_page(data: dict[str, pd.DataFrame]) -> None:
             "for the downstream Workbench tabs."
         )
         candidate_extraction_page(data)
+
+
+def source_resolution_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Source Resolution")
+    page_summary("Resolve where methodology information lives when a standard does not publish a clean methodology table or catalogue.")
+    st.info(
+        "Some standards do not have a dedicated methodologies section. Source Resolution decides where methodology information lives before extraction is designed. "
+        "Valid outcomes include automated extraction, document-family capture, adopted-method pointer, access request, unresolved, or park."
+    )
+    st.write(
+        "Use this when a source appears to have one or a few methods, no clean methodology index, or access constraints. "
+        "A resolution run can still create review records, supporting links, and issues for the downstream Workbench tabs."
+    )
+
+    st.subheader("High-Activity Source Comparison")
+    comparison = pd.DataFrame(
+        [
+            {
+                "Source": "Climate Action Reserve",
+                "Resolution": "Clean protocols page",
+                "Current handling": "Automated extraction from clean protocols table.",
+                "Catalogue action": "Review/export extracted protocol records.",
+            },
+            {
+                "Source": "Artisan C-sink",
+                "Resolution": "No separate methodology index",
+                "Current handling": "Document-family capture from standard page/PDF plus clarification documents.",
+                "Catalogue action": "Capture as one Standard / Document family record with supporting evidence.",
+            },
+            {
+                "Source": "Open Forest Protocol (OFP)",
+                "Resolution": "Access-gated methodology",
+                "Current handling": "Request access; do not bypass DocSend or access controls.",
+                "Catalogue action": "Track as access request until official materials are available.",
+            },
+            {
+                "Source": "Taiwan VER",
+                "Resolution": "Official platform inaccessible / unresolved",
+                "Current handling": "Project-derived or unresolved until platform access improves.",
+                "Catalogue action": "Keep in investigation queue; avoid overclaiming methodology coverage.",
+            },
+        ]
+    )
+    st.dataframe(comparison, hide_index=True, use_container_width=True)
+
+    st.subheader("Supported Source-Resolution Case")
+    st.write(
+        "Artisan C-sink is handled as a document-family case, not a normal table extractor. "
+        "The resolver fetches only the public source page, does not parse full PDFs, and keeps all outputs pending review."
+    )
+    st.caption(f"Fallback public source page if no clean registry page is available: {ARTISAN_C_SINK_FALLBACK_SOURCE_URL}")
+    if st.button("Resolve Artisan C-sink source", type="primary"):
+        with st.spinner("Resolving Artisan C-sink source page..."):
+            resolution_df, candidates_df, errors_df = resolve_artisan_c_sink_source(data.get("source_profiles", pd.DataFrame()))
+        st.session_state["source_resolution_results"] = resolution_df
+        st.session_state["source_resolution_candidates"] = candidates_df
+        st.session_state["source_resolution_errors"] = errors_df
+        st.session_state["candidate_extraction_results"] = candidates_df
+        st.session_state["candidate_extraction_errors"] = errors_df
+        st.session_state["candidate_extraction_enrichment_metrics"] = {}
+        st.session_state["candidate_extraction_sources_attempted"] = 1
+        st.session_state["source_resolution_last_run"] = "Artisan C-sink"
+        st.session_state["demo_source_last_run"] = ""
+
+    resolution = st.session_state.get("source_resolution_results", pd.DataFrame(columns=SOURCE_RESOLUTION_SCHEMA))
+    candidates = apply_output_safeguards(st.session_state.get("source_resolution_candidates", pd.DataFrame(columns=CANDIDATE_SCHEMA)))
+    errors = st.session_state.get("source_resolution_errors", pd.DataFrame(columns=EXTRACTION_ERROR_SCHEMA))
+    if resolution.empty:
+        st.info("Run Artisan C-sink source resolution to create a document-family record and supporting-link audit.")
+        return
+
+    st.subheader("Resolution Result")
+    show_dataframe(select_existing(resolution, SOURCE_RESOLUTION_SCHEMA), "source_resolution_results", height=180)
+    methodunit_records = candidates[candidates.get("candidate_type", pd.Series("", index=candidates.index)).eq("methodunit_candidate")]
+    supporting_links = candidates[candidates.get("candidate_type", pd.Series("", index=candidates.index)).eq("supporting_document")]
+    metric_row(
+        [
+            ("Document-family records", len(methodunit_records)),
+            ("Supporting links", len(supporting_links)),
+            ("Issues logged", len(errors)),
+        ]
+    )
+
+    st.subheader("Created Record")
+    if methodunit_records.empty:
+        st.warning("No document-family record was created. Review source-access issues below.")
+    else:
+        show_dataframe(
+            select_existing(
+                methodunit_records,
+                ["program_name", "methodunit_name", "unit_type", "source_url", "document_url", "confidence", "review_status", "notes"],
+            ),
+            "source_resolution_methodunit",
+            height=180,
+        )
+
+    st.subheader("Supporting Documents")
+    if supporting_links.empty:
+        st.info("No clarification/supporting documents were detected on this source page.")
+    else:
+        show_dataframe(
+            select_existing(supporting_links, ["program_name", "methodunit_name", "candidate_type", "document_url", "classification_reason", "notes"]),
+            "source_resolution_supporting",
+            height=260,
+        )
+
+    st.subheader("Issues to Resolve")
+    if errors.empty:
+        st.info("No source-resolution issues were logged.")
+    else:
+        st.write("If the standard PDF link is missing, broken, redirected, or returns an error, preserve it here as a source issue rather than an app failure.")
+        show_dataframe(select_existing(errors, EXTRACTION_ERROR_SCHEMA), "source_resolution_errors", height=220)
 
 
 def candidate_review_page(data: dict[str, pd.DataFrame]) -> None:
@@ -3483,7 +3805,7 @@ def candidate_review_page(data: dict[str, pd.DataFrame]) -> None:
 
     st.caption(f"Review queue source: {source_label}")
     if candidates.empty:
-        st.info("No extracted records are loaded yet. Go to Extract from Sources and run Climate Action Reserve or City Forest Credits.")
+        st.info("No extracted records are loaded yet. Go to Extract from Sources and run Climate Action Reserve or City Forest Credits, or use Source Resolution for Artisan C-sink.")
         return
 
     if "candidate_type" in candidates.columns:
@@ -3546,7 +3868,7 @@ def evidence_links_page(data: dict[str, pd.DataFrame]) -> None:
                 st.error(f"Could not read uploaded CSV: {exc}")
     st.caption(f"Current data source: {source_label}")
     if links.empty:
-        st.info("No supporting links are loaded yet. Run extraction first.")
+        st.info("No supporting links are loaded yet. Run extraction or source resolution first.")
         return
     filtered = inline_filters(
         links,
@@ -3641,7 +3963,7 @@ def export_page(data: dict[str, pd.DataFrame]) -> None:
 
     if methodunits.empty and links.empty and errors.empty:
         st.info(
-            "No extraction output is available yet. Open Workbench -> Extract from Sources, or run a quick Demo, before returning here to export."
+            "No extraction output is available yet. Open Workbench -> Extract from Sources, use Source Resolution, or run a quick Demo before returning here to export."
         )
 
     downloads = [
@@ -3677,11 +3999,11 @@ def workbench_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Workbench")
     page_summary("The operational layer for inspecting sources, running extraction, reviewing records, resolving issues, and preparing exports.")
     st.info(
-        "Use this page after the demo. Extract from Sources creates the latest outputs used by Review Extracted Records, Supporting Links, Issues to Resolve, and Export for Catalogue."
+        "Use this page after the demo. Extract from Sources and Source Resolution create the latest outputs used by Review Extracted Records, Supporting Links, Issues to Resolve, and Export for Catalogue."
     )
-    st.markdown("**Choose sources -> check access -> extract records -> review records/supporting links/issues -> export**")
+    st.markdown("**Choose sources -> check access -> extract or resolve records -> review records/supporting links/issues -> export**")
     st.write(
-        "Review Extracted Records, Supporting Links, and Issues to Resolve read from the latest extraction run first, then from saved outputs if no run is loaded. "
+        "Review Extracted Records, Supporting Links, and Issues to Resolve read from the latest extraction or source-resolution run first, then from saved outputs if no run is loaded. "
         "A quick demo run also populates the same latest extraction state used by these tabs."
     )
 
@@ -3689,6 +4011,7 @@ def workbench_page(data: dict[str, pd.DataFrame]) -> None:
         [
             "Source Registry",
             "Extract from Sources",
+            "Source Resolution",
             "Review Extracted Records",
             "Supporting Links",
             "Issues to Resolve",
@@ -3701,14 +4024,16 @@ def workbench_page(data: dict[str, pd.DataFrame]) -> None:
     with tabs[1]:
         run_connectors_workflow_page(data)
     with tabs[2]:
-        candidate_review_page(data)
+        source_resolution_page(data)
     with tabs[3]:
-        evidence_links_page(data)
+        candidate_review_page(data)
     with tabs[4]:
-        qa_exceptions_page(data)
+        evidence_links_page(data)
     with tabs[5]:
-        export_page(data)
+        qa_exceptions_page(data)
     with tabs[6]:
+        export_page(data)
+    with tabs[7]:
         interpreting_outputs_page(data)
 
 
@@ -3983,7 +4308,7 @@ def source_landscape_page(data: dict[str, pd.DataFrame]) -> None:
         {"Source archetype": "PDF / document family", "What it means": "Methodologies published as document / protocol families with links.", "Example programmes": "City Forest Credits, ART/TREES, C-Capsule", "Extraction strategy": "List document links first; parse PDFs later in a controlled workflow.", "Current status": "Implemented for CFC at document-link level"},
         {"Source archetype": "Adopted external methods", "What it means": "Programmes that adopt CDM or other external methodologies.", "Example programmes": "Asia Carbon Institute, Social Carbon", "Extraction strategy": "Detect native vs adopted methods and preserve source references.", "Current status": "Partially implemented for ACI; source access can fail"},
         {"Source archetype": "JS-heavy portal", "What it means": "Registries or portals that render content client-side.", "Example programmes": "Verra, Gold Standard, Isometric, Riverse", "Extraction strategy": "Use source-specific analysis later; not simple HTML scraping.", "Current status": "Not implemented"},
-        {"Source archetype": "No clear methodology page", "What it means": "Small or unresolved programmes without a public methodology index.", "Example programmes": "Small or unresolved programmes", "Extraction strategy": "Manual source profile, monitoring, and issue tracking.", "Current status": "Represented in the source registry and issues log"},
+        {"Source archetype": "No clear methodology page", "What it means": "Small or unresolved programmes without a public methodology index.", "Example programmes": "Artisan C-sink, OFP, Taiwan VER, small or unresolved programmes", "Extraction strategy": "Resolve where methodology information lives; capture document family, request access, mark unresolved, or park.", "Current status": "Implemented for Artisan C-sink as source resolution"},
     ]
     st.dataframe(pd.DataFrame(archetype_rows), hide_index=True, use_container_width=True)
 
@@ -4016,7 +4341,7 @@ def ingestion_workflow_page(data: dict[str, pd.DataFrame]) -> None:
     page_summary("The assembly line from official source to catalogue export — with the operational controls to run it.")
     st.write(
         "Source information moves through source access checks, source-specific extraction, "
-        "record classification, evidence capture, human review, and catalogue export. "
+        "source resolution for no-index standards, record classification, evidence capture, human review, and catalogue export. "
         "This page shows the pipeline and lets you run each operational step."
     )
 
@@ -4028,11 +4353,13 @@ def ingestion_workflow_page(data: dict[str, pd.DataFrame]) -> None:
     )
 
     st.subheader("Stage Status")
+    st.caption("When a standard has no clean methodology index, Source Resolution decides whether to capture a document family, request access, keep an adopted-method pointer, mark unresolved, or park the source.")
     section_note("Each stage has its own inputs, outputs, and current implementation state.")
     stage_rows = [
         {"Stage": "Source Registry", "What happens": "Maintain the official source map for each programme.", "Current implementation status": "Loaded from CSV", "Outputs produced": "Programme profiles, source URLs, extraction strategy notes"},
         {"Stage": "Source Access Check", "What happens": "Verify whether official source pages are reachable and list candidate document links.", "Current implementation status": "Working", "Outputs produced": "Live source check results with status, links, and errors"},
         {"Stage": "Source-Specific Extraction", "What happens": "Run source-specific ingestion logic for supported public sources.", "Current implementation status": "Working for CAR, CFC, ICR (discovery), ACI (source exception)", "Outputs produced": "Candidate MethodUnit rows and supporting links"},
+        {"Stage": "Source Resolution", "What happens": "Resolve where methodology information lives when there is no clean methodology index.", "Current implementation status": "Implemented for Artisan C-sink", "Outputs produced": "Document-family record, supporting clarification links, source-resolution issues"},
         {"Stage": "Record Classification", "What happens": "Classify each row as extracted record, supporting document, development page, navigation link, or excluded.", "Current implementation status": "Working", "Outputs produced": "candidate_type and classification_reason"},
         {"Stage": "Evidence Capture", "What happens": "Preserve source URLs, detail URLs, and notes behind every extracted record.", "Current implementation status": "Working", "Outputs produced": "source_url, document_url, notes"},
         {"Stage": "Human Review", "What happens": "Reviewer inspects extracted records, marks readiness, and decides next action.", "Current implementation status": "In-app review filters and decisions; not persisted", "Outputs produced": "record_readiness and review decision"},
@@ -4044,10 +4371,14 @@ def ingestion_workflow_page(data: dict[str, pd.DataFrame]) -> None:
     st.subheader("Run the Workflow")
     st.caption(
         "Quick Demo runs a one-source end-to-end extraction. Step 1 checks source access. "
-        "Step 2 runs the full set of supported source-specific extractors."
+        "Step 2 covers structured extraction from clean methodology/protocol pages and source resolution/document-family capture for sources like Artisan C-sink."
     )
-    demo_tab, step1_tab, step2_tab = st.tabs(
-        ["Quick Demo", "Step 1: Source access check", "Step 2: Extract records"]
+    st.info(
+        "Extraction is used when a source has a structured methodology/protocol page. "
+        "Source Resolution is used when a source lacks a clean methodology page and must be classified before catalogue ingestion."
+    )
+    demo_tab, step1_tab, step2_tab, resolution_tab = st.tabs(
+        ["Quick Demo", "Step 1: Source access check", "Step 2: Extract or resolve records", "Source Resolution"]
     )
     with demo_tab:
         st.write(
@@ -4074,6 +4405,7 @@ def ingestion_workflow_page(data: dict[str, pd.DataFrame]) -> None:
             st.session_state["candidate_extraction_enrichment_metrics"] = q_metrics
             st.session_state["candidate_extraction_sources_attempted"] = 1
             st.session_state["demo_source_last_run"] = demo_source
+            st.session_state["source_resolution_last_run"] = ""
             st.success(
                 f"Quick demo for {demo_source} finished. Open **Evidence & Review** to inspect the results."
             )
@@ -4081,6 +4413,8 @@ def ingestion_workflow_page(data: dict[str, pd.DataFrame]) -> None:
         live_source_check_page(data)
     with step2_tab:
         candidate_extraction_page(data)
+    with resolution_tab:
+        source_resolution_page(data)
 
 
 def coverage_progress_page(data: dict[str, pd.DataFrame]) -> None:
@@ -4118,6 +4452,7 @@ def coverage_progress_page(data: dict[str, pd.DataFrame]) -> None:
     tracker_rows = [
         {"Programme / source": "Climate Action Reserve", "Current status": "working", "Extractor / source type": "structured HTML protocol table", "Current output": "extracted protocol records", "Issue / risk": "none material", "Recommended next action": "keep stable; use as reference pattern", "Suggested wave": "Wave 1"},
         {"Programme / source": "City Forest Credits", "Current status": "working / partial", "Extractor / source type": "document / protocol-family links", "Current output": "protocol / standard document links", "Issue / risk": "PDF metadata not parsed", "Recommended next action": "review titles and versions; consider PDF parsing later", "Suggested wave": "Wave 2"},
+        {"Programme / source": "Artisan C-sink", "Current status": "source resolution implemented", "Extractor / source type": "no methodology index / document-family standard", "Current output": "one document-family record plus clarification links", "Issue / risk": "stable standard PDF link should be reviewed", "Recommended next action": "capture as document-family; review standard and clarification documents", "Suggested wave": "Wave 3"},
         {"Programme / source": "International Carbon Registry / ICR", "Current status": "partial / discovery", "Extractor / source type": "M-ICR codes and detail URLs", "Current output": "discovery records", "Issue / risk": "titles require manual review", "Recommended next action": "treat as discovery records; verify titles", "Suggested wave": "Wave 1"},
         {"Programme / source": "Asia Carbon Institute", "Current status": "blocked / source access", "Extractor / source type": "adopted external methods", "Current output": "source-access error logged", "Issue / risk": "SSL / certificate issue", "Recommended next action": "manual check or retry; do not bypass SSL by default", "Suggested wave": "Wave 4"},
         {"Programme / source": "Plan Vivo", "Current status": "recommended next", "Extractor / source type": "document / protocol-family", "Current output": "n/a", "Issue / risk": "document-first source", "Recommended next action": "extend the CFC pattern for document listing", "Suggested wave": "Wave 2"},
@@ -4178,12 +4513,14 @@ def evidence_and_review_page(data: dict[str, pd.DataFrame]) -> None:
         st.session_state.get("candidate_extraction_results", pd.DataFrame(columns=CANDIDATE_SCHEMA))
     )
     errors = st.session_state.get("candidate_extraction_errors", pd.DataFrame(columns=EXTRACTION_ERROR_SCHEMA))
-    last_run = st.session_state.get("demo_source_last_run", "")
+    source_resolution_run = st.session_state.get("source_resolution_last_run", "")
+    demo_run = st.session_state.get("demo_source_last_run", "")
+    last_run = f"{source_resolution_run} source resolution" if source_resolution_run else demo_run
 
     if candidates.empty and errors.empty:
         st.info(
             "No extraction outputs are loaded in this session. "
-            "Open **Ingestion Workflow → Quick Demo** or **Step 2: Extract records** to produce records, then return here."
+            "Open **Ingestion Workflow -> Quick Demo** or **Step 2: Extract or resolve records** to produce records, then return here."
         )
     else:
         with st.expander("Result interpretation summary", expanded=True):
@@ -4259,7 +4596,7 @@ def main() -> None:
     data = load_data()
     st.title(APP_TITLE)
 
-    st.sidebar.title("Source Intelligence Control Room")
+    st.sidebar.title(APP_TITLE)
     sidebar_data_status(data)
     page = st.sidebar.radio(
         "Pages",
