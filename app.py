@@ -1284,20 +1284,26 @@ def source_landscape_page(data: dict[str, pd.DataFrame]) -> None:
 
     plan = derive_onboarding_plan(profiles)
 
-    st.subheader("Source Universe Snapshot")
+    has_method_rows = profiles.get("currently_has_methodology_rows", pd.Series("", index=profiles.index)).astype(str).str.strip().str.lower().eq("yes")
+    needs_resolution = count_value(plan, "onboarding_category", "Needs manual investigation") + count_value(
+        plan,
+        "onboarding_category",
+        "Needs document/PDF parsing",
+    )
+
+    st.subheader("Programme Status")
     metric_row(
         [
-            ("Total sources", len(plan)),
-            ("Working or partial extractor", count_value(plan, "onboarding_category", "Working extractor")),
-            ("Ready for extraction", count_value(plan, "onboarding_category", "Ready for extraction")),
-            ("Needs URL repair", count_value(plan, "onboarding_category", "Needs URL repair")),
+            ("Total programmes", len(plan)),
+            ("Programmes with methodology rows", int(has_method_rows.sum())),
+            ("Programmes without methodology rows", int((~has_method_rows).sum())),
         ]
     )
     metric_row(
         [
-            ("Needs PDF/document parsing", count_value(plan, "onboarding_category", "Needs document/PDF parsing")),
-            ("Needs browser automation later", count_value(plan, "onboarding_category", "Needs browser automation later")),
-            ("Needs manual investigation", count_value(plan, "onboarding_category", "Needs manual investigation")),
+            ("Working/partial extractor", count_value(plan, "onboarding_category", "Working extractor")),
+            ("Ready for extraction", count_value(plan, "onboarding_category", "Ready for extraction")),
+            ("Needs investigation or source resolution", needs_resolution),
         ]
     )
 
@@ -1424,6 +1430,121 @@ def ingestion_workflow_page(data: dict[str, pd.DataFrame]) -> None:
         source_resolution_page(data)
 
 
+def explore_source_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Explore Source")
+    page_summary("Choose a source and see what the app found: records, documents, issues, and the recommended next action.")
+    st.write("Pick a source, run exploration, and review what happened.")
+
+    st.info(
+        "**Recommended demo path**\n\n"
+        "- CAR: clean methodology/protocol table.\n"
+        "- City Forest Credits: document/protocol-family source.\n"
+        "- Artisan C-sink: no clean methodology page; source-resolution case."
+    )
+
+    source_context = {
+        "Climate Action Reserve": {
+            "mode": "clean table extraction",
+            "next_action": "Review the records found from the public protocol table, then export if they look right.",
+            "spinner": "Exploring Climate Action Reserve...",
+        },
+        "City Forest Credits": {
+            "mode": "document/protocol-family extraction",
+            "next_action": "Review document titles, versions, and supporting links before catalogue handoff.",
+            "spinner": "Exploring City Forest Credits...",
+        },
+        "Artisan C-sink": {
+            "mode": "source resolution",
+            "next_action": "Review the document-family record and supporting clarification links before catalogue handoff.",
+            "spinner": "Resolving Artisan C-sink source...",
+        },
+    }
+    source = st.selectbox("Source to explore", list(source_context.keys()), key="explore_source_select")
+
+    if st.button("Explore source", type="primary", key="explore_source_run"):
+        context = source_context[source]
+        with st.spinner(context["spinner"]):
+            if source == "Artisan C-sink":
+                resolution_df, candidates_df, errors_df = resolve_artisan_c_sink_source(data.get("source_profiles", pd.DataFrame()))
+                enrichment_metrics = {}
+                st.session_state["source_resolution_results"] = resolution_df
+                st.session_state["source_resolution_candidates"] = candidates_df
+                st.session_state["source_resolution_errors"] = errors_df
+                st.session_state["source_resolution_last_run"] = "Artisan C-sink"
+                st.session_state["demo_source_last_run"] = ""
+            else:
+                extractor = {
+                    "Climate Action Reserve": extract_climate_action_reserve_candidates,
+                    "City Forest Credits": extract_cfc_candidates,
+                }[source]
+                candidates_df, errors_df, enrichment_metrics = normalize_demo_extraction_result(
+                    extractor(data.get("source_profiles", pd.DataFrame()))
+                )
+                st.session_state["source_resolution_last_run"] = ""
+                st.session_state["demo_source_last_run"] = source
+                st.session_state["source_resolution_results"] = pd.DataFrame(columns=SOURCE_RESOLUTION_SCHEMA)
+                st.session_state["source_resolution_candidates"] = pd.DataFrame(columns=CANDIDATE_SCHEMA)
+                st.session_state["source_resolution_errors"] = pd.DataFrame(columns=EXTRACTION_ERROR_SCHEMA)
+
+            st.session_state["candidate_extraction_results"] = candidates_df
+            st.session_state["candidate_extraction_errors"] = errors_df
+            st.session_state["candidate_extraction_enrichment_metrics"] = enrichment_metrics
+            st.session_state["candidate_extraction_sources_attempted"] = 1
+
+            methodunit_count = count_value(candidates_df, "candidate_type", "methodunit_candidate")
+            supporting_count = len(candidates_df) - methodunit_count
+            if not candidates_df.empty:
+                source_status = "reached"
+            elif not errors_df.empty:
+                source_status = "not reached / access issue"
+            else:
+                source_status = "no records found"
+            st.session_state["source_exploration_summary"] = {
+                "Source": source,
+                "Source status": source_status,
+                "MethodUnit records found": methodunit_count,
+                "Supporting links found": supporting_count,
+                "Issues logged": len(errors_df),
+                "Mode used": context["mode"],
+                "Recommended next action": context["next_action"],
+            }
+
+    summary = st.session_state.get("source_exploration_summary", {})
+    if not summary:
+        st.info("Choose a source and click **Explore source** to create review-ready records and evidence.")
+        return
+
+    st.subheader("Run Summary")
+    metric_row(
+        [
+            ("Source status", summary.get("Source status", "")),
+            ("MethodUnit records found", summary.get("MethodUnit records found", 0)),
+            ("Supporting links found", summary.get("Supporting links found", 0)),
+            ("Issues logged", summary.get("Issues logged", 0)),
+        ]
+    )
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {"Result": "Source", "Value": summary.get("Source", "")},
+                {"Result": "Mode used", "Value": summary.get("Mode used", "")},
+                {"Result": "Recommended next action", "Value": summary.get("Recommended next action", "")},
+            ]
+        ),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    errors = st.session_state.get("candidate_extraction_errors", pd.DataFrame(columns=EXTRACTION_ERROR_SCHEMA))
+    if errors.empty:
+        st.success("No access or extraction issues were logged for this run.")
+    else:
+        st.warning("Issues were logged. Review them before using the output package.")
+        show_dataframe(select_existing(errors, EXTRACTION_ERROR_SCHEMA), "explore_source_errors", height=180)
+
+    st.info("Review extracted records and evidence on the **Evidence & Review** page.")
+
+
 def coverage_progress_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Coverage Progress")
     page_summary("Source-by-source implementation progress and onboarding waves.")
@@ -1442,15 +1563,15 @@ def coverage_progress_page(data: dict[str, pd.DataFrame]) -> None:
         [
             ("Working or partial extractors", count_value(plan, "onboarding_category", "Working extractor")),
             ("Ready for extraction", count_value(plan, "onboarding_category", "Ready for extraction")),
-            ("Blocked / URL repair", count_value(plan, "onboarding_category", "Needs URL repair")),
+            ("Access issue or URL repair", count_value(plan, "onboarding_category", "Needs URL repair")),
             ("Recommended next sources", 2),
         ]
     )
     metric_row(
         [
-            ("Needs document/PDF parsing", count_value(plan, "onboarding_category", "Needs document/PDF parsing")),
-            ("Needs browser automation later", count_value(plan, "onboarding_category", "Needs browser automation later")),
-            ("Needs manual investigation", count_value(plan, "onboarding_category", "Needs manual investigation")),
+            ("Documents found / parsing later", count_value(plan, "onboarding_category", "Needs document/PDF parsing")),
+            ("Portal source / not attempted yet", count_value(plan, "onboarding_category", "Needs browser automation later")),
+            ("Source resolution needed", count_value(plan, "onboarding_category", "Needs manual investigation")),
         ]
     )
 
@@ -1539,7 +1660,7 @@ def evidence_and_review_page(data: dict[str, pd.DataFrame]) -> None:
     if candidates.empty and errors.empty:
         st.info(
             "No extraction outputs are loaded in this session. "
-            "Open **Ingestion Workflow -> Quick Demo** or **Step 2: Extract or resolve records** to produce records, then return here."
+            "Open **Explore Source**, choose a source, and run exploration to produce records, then return here."
         )
     else:
         with st.expander("Result interpretation summary", expanded=True):
@@ -1623,7 +1744,7 @@ def main() -> None:
         "Pages",
         [
             "Source Landscape",
-            "Ingestion Workflow",
+            "Explore Source",
             "Coverage Progress",
             "Evidence & Review",
             "AI-Assisted Scaling",
@@ -1632,8 +1753,8 @@ def main() -> None:
 
     if page == "Source Landscape":
         source_landscape_page(data)
-    elif page == "Ingestion Workflow":
-        ingestion_workflow_page(data)
+    elif page == "Explore Source":
+        explore_source_page(data)
     elif page == "Coverage Progress":
         coverage_progress_page(data)
     elif page == "Evidence & Review":
