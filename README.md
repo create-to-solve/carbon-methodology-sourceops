@@ -1,6 +1,6 @@
-# Carbon Methodology SourceOps Workbench
+# Carbon Methodology Intelligence Platform
 
-**Carbon Methodology SourceOps Workbench for carbon methodology ingestion.**
+**Carbon Methodology Intelligence Platform / SourceOps Workbench for carbon methodology intelligence.**
 
 `Carbon Methodology SourceOps Workbench` is a local Streamlit prototype that maps the carbon methodology source universe, tracks extraction readiness, runs source-specific ingestion workflows, preserves evidence behind extracted records, and shows how AI can responsibly assist messy review tasks — without blindly scraping the web.
 
@@ -16,7 +16,19 @@ Carbon methodology information is scattered across heterogeneous official source
 4. **Evidence-first review.** Every extracted record is paired with its supporting material, its issues, and an export handoff — nothing goes to a catalogue automatically.
 5. **AI-assisted analyst.** A roadmap for AI to help on messy cases with clear evidence and human control.
 
+The current app is framed as an ecosystem intelligence platform first, with SourceOps workflows available as operational controls behind the platform views.
+
 ## App Pages
+
+1. **Overview** - executive metrics, source landscape, coverage maturity, current connector priorities, and platform workflow.
+2. **Source Registry** - detailed programme-level source intelligence and official URLs.
+3. **Coverage Explorer** - implementation status, recommended next sources, onboarding waves, and source-resolution audit coverage.
+4. **Evidence & Review** - extracted records, supporting material, issues, export, and output interpretation.
+5. **Connector Pipeline** - source exploration controls plus advanced source checks, extraction, and source-resolution workflows.
+6. **Exports** - review-ready CSV downloads and timestamped output saves.
+7. **Strategy** - connector priorities, AI-assisted scaling roadmap, future task schema, and guardrails.
+
+## Previous Prototype Page Framing
 
 1. **Source Landscape** — the source universe: total programmes, source archetypes, and the filterable source registry.
 2. **Ingestion Workflow** — the pipeline visual, stage status, and the operational controls (Quick Demo, Source Access Check, Extract or Resolve Records, Source Resolution).

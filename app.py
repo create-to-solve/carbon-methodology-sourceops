@@ -40,6 +40,7 @@ from pipeline import (
     save_timestamped_outputs,
     select_existing,
     session_or_output,
+    text_blob,
     value_counts_df,
 )
 from extractors import (
@@ -52,7 +53,7 @@ from extractors import (
 )
 
 
-APP_TITLE = "Carbon Methodology SourceOps Workbench"
+APP_TITLE = "Carbon Methodology Intelligence Platform"
 
 RECOMMENDED_SOURCE_CHECK_PRESETS = [
     "Climate Action Reserve",
@@ -99,7 +100,8 @@ def dataframe_config(df: pd.DataFrame) -> dict:
     config = {}
     for column in df.columns:
         if column.endswith("_url") or column in {"official_website", "evidence_urls"}:
-            config[column] = st.column_config.LinkColumn(pretty_label(column), display_text=None)
+            label = "Current Source URL" if column == "current_source_url" else pretty_label(column)
+            config[column] = st.column_config.LinkColumn(label, display_text=None, width="large")
         else:
             config[column] = st.column_config.TextColumn(pretty_label(column))
     return config
@@ -138,12 +140,29 @@ def show_bar_chart(df: pd.DataFrame, x: str, y: str, empty_message: str) -> None
     st.bar_chart(df, x=x, y=y)
 
 
-def sidebar_data_status(data: dict[str, pd.DataFrame]) -> None:
-    with st.sidebar.expander("Data status", expanded=False):
-        for key, file_name in FILES.items():
-            row_count = len(data.get(key, pd.DataFrame()))
-            st.write(f"{file_name}: {row_count} rows")
-        st.write(f"{SOURCE_RESOLUTION_AUDIT_FILE}: {len(data.get('source_resolution_audit', pd.DataFrame()))} rows")
+def current_session_timestamp() -> str:
+    summary = st.session_state.get("source_exploration_summary", {})
+    if summary.get("Run timestamp"):
+        return summary["Run timestamp"]
+    extracted = current_extracted_links()
+    if not extracted.empty and "extracted_at" in extracted.columns:
+        latest = extracted["extracted_at"].astype(str).str.strip()
+        latest = latest[latest.ne("")]
+        if not latest.empty:
+            return latest.max()
+    return "Not run this session"
+
+
+def sidebar_workspace_status(data: dict[str, pd.DataFrame]) -> None:
+    profiles = data.get("source_profiles", pd.DataFrame())
+    qa = data.get("qa_flags", pd.DataFrame())
+    st.sidebar.caption("Workspace Status")
+    st.sidebar.metric("Programmes", len(profiles))
+    st.sidebar.metric("Operational connectors", len(SUPPORTED_EXTRACTORS))
+    st.sidebar.metric("Candidate methods", len(current_methodunit_candidates()))
+    st.sidebar.metric("Evidence links", len(current_extracted_links()))
+    st.sidebar.metric("QA rules", len(qa))
+    st.sidebar.caption(f"Last refresh: {current_session_timestamp()}")
 
 
 def inline_filters(df: pd.DataFrame, filter_columns: list[str], key_prefix: str, defaults: dict[str, list[str]] | None = None) -> pd.DataFrame:
@@ -200,6 +219,113 @@ def source_resolution_audit_issue_rows(audit: pd.DataFrame) -> pd.DataFrame:
     review_status = audit.get("review_status", pd.Series("", index=audit.index)).astype(str).str.strip().str.lower()
     review_issue = review_status.isin(["needs_research", "access_request", "unresolved", "parked"])
     return audit[issue | review_issue].copy()
+
+
+def programme_status_counts(profiles: pd.DataFrame, plan: pd.DataFrame) -> dict[str, int]:
+    if profiles.empty:
+        return {
+            "total_programmes": 0,
+            "programmes_mapped": 0,
+            "programmes_requiring_investigation": 0,
+            "operational_connectors": 0,
+        }
+    method_source = profiles.get("method_source_url", pd.Series("", index=profiles.index)).astype(str).str.strip()
+    official_site = profiles.get("official_website", pd.Series("", index=profiles.index)).astype(str).str.strip()
+    mapped = method_source.ne("") | official_site.ne("")
+    investigation_categories = [
+        "Needs manual investigation",
+        "Needs URL repair",
+        "Needs browser automation later",
+        "Needs document/PDF parsing",
+    ]
+    investigation = int(plan.get("onboarding_category", pd.Series("", index=plan.index)).isin(investigation_categories).sum())
+    return {
+        "total_programmes": len(profiles),
+        "programmes_mapped": int(mapped.sum()),
+        "programmes_requiring_investigation": investigation,
+        "operational_connectors": count_value(plan, "onboarding_category", "Working extractor"),
+    }
+
+
+def source_pattern_label(row: pd.Series) -> str:
+    text = text_blob(row, ["connector_type", "source_type", "extraction_strategy", "notes", "populated_source_status"])
+    if any(term in text for term in ["js-heavy", "portal", "dynamic", "headless"]):
+        return "JS-heavy portals"
+    if any(term in text for term in ["adopted", "external", "cdm"]):
+        return "Adopted external methods"
+    if any(term in text for term in ["api", "registry"]):
+        return "API/registry sources"
+    if any(term in text for term in ["pdf", "document", "guideline"]):
+        return "PDF/document-first"
+    if any(term in text for term in ["catalog", "catalogue", "html", "table", "list"]):
+        return "HTML/catalogue-first"
+    return "Unknown/manual investigation"
+
+
+def source_pattern_counts(profiles: pd.DataFrame) -> pd.DataFrame:
+    labels = [
+        "HTML/catalogue-first",
+        "PDF/document-first",
+        "JS-heavy portals",
+        "Adopted external methods",
+        "API/registry sources",
+        "Unknown/manual investigation",
+    ]
+    if profiles.empty:
+        return pd.DataFrame({"Source pattern": labels, "Programmes": [0] * len(labels)})
+    pattern_series = profiles.apply(source_pattern_label, axis=1)
+    counts = pattern_series.value_counts().reindex(labels, fill_value=0).reset_index()
+    counts.columns = ["Source pattern", "Programmes"]
+    return counts
+
+
+def maturity_counts(plan: pd.DataFrame) -> pd.DataFrame:
+    if plan.empty or "onboarding_category" not in plan.columns:
+        return pd.DataFrame(columns=["Coverage maturity", "Programmes"])
+    label_map = {
+        "Working extractor": "Operational / partial connector",
+        "Ready for extraction": "Ready for connector build",
+        "Needs URL repair": "Access issue or URL repair",
+        "Needs document/PDF parsing": "Documents found / parsing later",
+        "Needs browser automation later": "Portal source / not attempted yet",
+        "Needs adopted-method handling": "Adopted-method handling needed",
+        "Needs manual investigation": "Source resolution needed",
+    }
+    maturity = plan["onboarding_category"].map(label_map).fillna(plan["onboarding_category"])
+    counts = maturity.value_counts().reset_index()
+    counts.columns = ["Coverage maturity", "Programmes"]
+    return counts
+
+
+def connector_priority_rows(data: dict[str, pd.DataFrame], plan: pd.DataFrame) -> pd.DataFrame:
+    priorities = []
+    if not plan.empty and "program_name" in plan.columns:
+        for target in ["American Carbon Registry", "Climate Forward", "Plan Vivo", "City Forest Credits"]:
+            matches = plan[plan["program_name"].astype(str).str.contains(target, case=False, na=False)]
+            if matches.empty:
+                continue
+            row = matches.iloc[0]
+            priorities.append(
+                {
+                    "Rank": len(priorities) + 1,
+                    "Programme": row.get("program_name", target),
+                    "Why it matters": "High-priority catalogue-first HTML source." if "American Carbon Registry" in target else row.get("recommended_next_action", ""),
+                    "Current status": row.get("current_extraction_status", "not attempted yet"),
+                }
+            )
+    if not any("American Carbon Registry" in str(row.get("Programme", "")) for row in priorities):
+        priorities.insert(
+            0,
+            {
+                "Rank": 1,
+                "Programme": "American Carbon Registry",
+                "Why it matters": "American Carbon Registry - high-priority catalogue-first HTML source.",
+                "Current status": "not attempted yet",
+            },
+        )
+    for index, row in enumerate(priorities, start=1):
+        row["Rank"] = index
+    return pd.DataFrame(priorities[:5])
 
 
 def render_audit_summary(audit: pd.DataFrame, key_prefix: str) -> None:
@@ -1270,6 +1396,101 @@ def export_page(data: dict[str, pd.DataFrame]) -> None:
             st.warning("No non-empty outputs were available to save.")
 
 
+def overview_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Carbon Methodology Intelligence Platform")
+    st.subheader("Understanding how methodology information is published, discovered, and operationalized across global carbon programmes.")
+
+    profiles = data.get("source_profiles", pd.DataFrame())
+    if not require_rows(profiles, "source registry"):
+        return
+    plan = derive_onboarding_plan(profiles)
+    status = programme_status_counts(profiles, plan)
+
+    st.subheader("Executive Snapshot")
+    metric_row(
+        [
+            ("Total programmes", status["total_programmes"]),
+            ("Programmes mapped", status["programmes_mapped"]),
+            ("Programmes requiring investigation", status["programmes_requiring_investigation"]),
+            ("Operational / partial connectors", status["operational_connectors"]),
+        ]
+    )
+
+    st.subheader("Source Landscape")
+    pattern_counts = source_pattern_counts(profiles)
+    show_bar_chart(pattern_counts, "Source pattern", "Programmes", "No source pattern counts are available.")
+    st.dataframe(pattern_counts, hide_index=True, use_container_width=True)
+
+    st.subheader("Coverage Maturity")
+    maturity = maturity_counts(plan)
+    show_bar_chart(maturity, "Coverage maturity", "Programmes", "No coverage maturity counts are available.")
+    st.dataframe(maturity, hide_index=True, use_container_width=True)
+
+    st.subheader("Current Priorities")
+    priorities = connector_priority_rows(data, plan)
+    st.dataframe(priorities, hide_index=True, use_container_width=True)
+
+    st.subheader("Platform Workflow")
+    st.markdown(
+        "**Source Universe -> Source Classification -> Connector Selection -> Candidate Extraction -> "
+        "Evidence Review -> Methodology Intelligence**"
+    )
+
+    with st.expander("Detailed registry preview", expanded=False):
+        section_note("Detailed programme rows remain available here and on the Source Registry page.")
+        display_columns = [
+            "program_name",
+            "current_source_url",
+            "connector_type",
+            "current_extraction_status",
+            "onboarding_category",
+            "recommended_next_action",
+            "confidence",
+        ]
+        show_dataframe(select_existing(plan, display_columns), "overview_registry_preview", height=360)
+
+
+def source_registry_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Source Registry")
+    page_summary("Detailed source intelligence for each programme, including official source URLs, source patterns, confidence, and next actions.")
+    profiles = data.get("source_profiles", pd.DataFrame())
+    if not require_rows(profiles, "source registry"):
+        return
+
+    plan = derive_onboarding_plan(profiles)
+    filtered = inline_filters(
+        plan,
+        ["onboarding_category", "connector_type", "confidence", "populated_source_status", "suggested_wave"],
+        "source_registry_platform",
+    )
+    display_columns = [
+        "program_name",
+        "current_source_url",
+        "method_source_url",
+        "official_website",
+        "registry_url",
+        "connector_type",
+        "current_extraction_status",
+        "onboarding_category",
+        "suggested_wave",
+        "recommended_next_action",
+        "confidence",
+        "notes",
+    ]
+    show_dataframe(select_existing(filtered, display_columns), "source_registry_platform", height=560)
+
+    with st.expander("Source archetype reference", expanded=False):
+        archetype_rows = [
+            {"Source archetype": "Structured HTML table", "What it means": "Official methodology or protocol table on a public page.", "Example programmes": "Climate Action Reserve", "Current status": "Implemented for CAR"},
+            {"Source archetype": "Methodology catalogue with detail pages", "What it means": "Index page of methodology codes linking to detail pages.", "Example programmes": "International Carbon Registry / ICR", "Current status": "Discovery-only; titles need review"},
+            {"Source archetype": "PDF / document family", "What it means": "Methodologies published as document / protocol families with links.", "Example programmes": "City Forest Credits, ART/TREES, C-Capsule", "Current status": "Implemented for CFC at document-link level"},
+            {"Source archetype": "Adopted external methods", "What it means": "Programmes that adopt CDM or other external methodologies.", "Example programmes": "Asia Carbon Institute, Social Carbon", "Current status": "Partially implemented for ACI; source access can fail"},
+            {"Source archetype": "JS-heavy portal", "What it means": "Registries or portals that render content client-side.", "Example programmes": "Verra, Gold Standard, Isometric, Riverse", "Current status": "Not attempted yet"},
+            {"Source archetype": "No clear methodology page", "What it means": "Programmes without a public methodology index.", "Example programmes": "Artisan C-sink, OFP, Taiwan VER", "Current status": "Implemented for Artisan C-sink as source resolution"},
+        ]
+        st.dataframe(pd.DataFrame(archetype_rows), hide_index=True, use_container_width=True)
+
+
 def source_landscape_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Source Landscape")
     page_summary("Map of the carbon methodology source universe — the programmes in the registry and the extraction archetype each one needs.")
@@ -1431,8 +1652,8 @@ def ingestion_workflow_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def explore_source_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Explore Source")
-    page_summary("Choose a source and see what the app found: records, documents, issues, and the recommended next action.")
+    st.header("Connector Pipeline")
+    page_summary("Choose a source and see what the platform found: records, documents, issues, and the recommended next action.")
     st.write("Pick a source, run exploration, and review what happened.")
 
     st.info(
@@ -1543,6 +1764,18 @@ def explore_source_page(data: dict[str, pd.DataFrame]) -> None:
         show_dataframe(select_existing(errors, EXTRACTION_ERROR_SCHEMA), "explore_source_errors", height=180)
 
     st.info("Review extracted records and evidence on the **Evidence & Review** page.")
+
+    with st.expander("Advanced connector controls", expanded=False):
+        st.caption("Operational controls remain available for source checks, multi-source extraction, and source-resolution review.")
+        step1_tab, step2_tab, resolution_tab = st.tabs(
+            ["Source access checks", "Multi-source extraction", "Source resolution"]
+        )
+        with step1_tab:
+            live_source_check_page(data)
+        with step2_tab:
+            candidate_extraction_page(data)
+        with resolution_tab:
+            source_resolution_page(data)
 
 
 def coverage_progress_page(data: dict[str, pd.DataFrame]) -> None:
@@ -1660,7 +1893,7 @@ def evidence_and_review_page(data: dict[str, pd.DataFrame]) -> None:
     if candidates.empty and errors.empty:
         st.info(
             "No extraction outputs are loaded in this session. "
-            "Open **Explore Source**, choose a source, and run exploration to produce records, then return here."
+            "Open **Connector Pipeline**, choose a source, and run exploration to produce records, then return here."
         )
     else:
         with st.expander("Result interpretation summary", expanded=True):
@@ -1681,8 +1914,18 @@ def evidence_and_review_page(data: dict[str, pd.DataFrame]) -> None:
         interpreting_outputs_page(data)
 
 
+def exports_page(data: dict[str, pd.DataFrame]) -> None:
+    export_page(data)
+
+
 def ai_assisted_scaling_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("AI-Assisted Scaling")
+    st.header("Strategy")
+    profiles = data.get("source_profiles", pd.DataFrame())
+    if not profiles.empty:
+        st.subheader("Connector Priorities")
+        st.dataframe(connector_priority_rows(data, derive_onboarding_plan(profiles)), hide_index=True, use_container_width=True)
+
+    st.subheader("AI-Assisted Scaling")
     page_summary("How AI can assist review responsibly — bounded to evidence, not blindly scraping.")
     st.info(
         "No AI API is called yet. This page describes a roadmap for how AI can assist review tasks with clear evidence and human control."
@@ -1739,27 +1982,33 @@ def main() -> None:
     st.title(APP_TITLE)
 
     st.sidebar.title(APP_TITLE)
-    sidebar_data_status(data)
+    sidebar_workspace_status(data)
     page = st.sidebar.radio(
         "Pages",
         [
-            "Source Landscape",
-            "Explore Source",
-            "Coverage Progress",
+            "Overview",
+            "Source Registry",
+            "Coverage Explorer",
             "Evidence & Review",
-            "AI-Assisted Scaling",
+            "Connector Pipeline",
+            "Exports",
+            "Strategy",
         ],
     )
 
-    if page == "Source Landscape":
-        source_landscape_page(data)
-    elif page == "Explore Source":
-        explore_source_page(data)
-    elif page == "Coverage Progress":
+    if page == "Overview":
+        overview_page(data)
+    elif page == "Source Registry":
+        source_registry_page(data)
+    elif page == "Coverage Explorer":
         coverage_progress_page(data)
     elif page == "Evidence & Review":
         evidence_and_review_page(data)
-    elif page == "AI-Assisted Scaling":
+    elif page == "Connector Pipeline":
+        explore_source_page(data)
+    elif page == "Exports":
+        exports_page(data)
+    elif page == "Strategy":
         ai_assisted_scaling_page(data)
 
 
