@@ -1,0 +1,1130 @@
+import hashlib
+import re
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+
+import pandas as pd
+
+try:
+    import requests
+except ImportError:  # pragma: no cover - handled in the Streamlit page.
+    requests = None
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:  # pragma: no cover - handled in the Streamlit page.
+    BeautifulSoup = None
+
+from pipeline import (
+    CANDIDATE_SCHEMA,
+    CODE_PATTERNS,
+    EXTRACTION_ERROR_SCHEMA,
+    LIKELY_LINK_TERMS,
+    SOURCE_RESOLUTION_SCHEMA,
+    SUPPORTING_DOCUMENT_TERMS,
+    DEVELOPMENT_PAGE_TERMS,
+    GENERIC_NAV_TERMS,
+    apply_candidate_classification,
+    apply_output_safeguards,
+    clean_url,
+    dedupe_candidates,
+    get_program_profile,
+    is_fetchable_url,
+    is_pdf_or_document_url,
+    looks_like_url,
+    make_extraction_error,
+    normalize_text,
+    profile_source_url,
+    should_capture_source_link,
+)
+
+
+POLITE_USER_AGENT = (
+    "CarbonMethodologySourceOpsWorkbench/0.1 "
+    "(local prototype; source reachability check; no bulk scraping)"
+)
+SOURCE_CHECK_MAX_PROGRAMMES = 10
+SOURCE_CHECK_TIMEOUT_SECONDS = 20
+ARTISAN_C_SINK_FALLBACK_SOURCE_URL = "https://www.carbon-standards.com/en/standards/service-505~global-artisan-c-sink.html"
+
+ICR_GENERIC_TITLE_LABELS = {
+    "and public",
+    "approved icr methodologies",
+    "approved methodologies",
+    "current stage",
+    "date of first approval",
+    "icr methodologies",
+    "methodology development",
+    "next",
+    "previous",
+    "sectoral scope",
+    "under development",
+}
+CFC_METHODUNIT_TERMS = (
+    "city forest credits standard",
+    "preservation protocol",
+    "afforestation",
+    "reforestation",
+    "afforestation/reforestation",
+    "carbon protocol",
+    "protocol",
+    "standard",
+)
+
+
+def is_document_response(content_type: str, final_url: str) -> bool:
+    content_type_l = str(content_type or "").lower()
+    final_url_l = str(final_url or "").lower()
+    document_extensions = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx")
+    document_types = (
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats",
+        "application/octet-stream",
+    )
+    return any(item in content_type_l for item in document_types) or final_url_l.endswith(document_extensions)
+
+
+def link_is_likely_document(text: str, href: str) -> bool:
+    candidate = f"{text} {href}".lower()
+    return any(term in candidate for term in LIKELY_LINK_TERMS)
+
+
+def parse_html_source(response, source_url: str) -> dict:
+    soup = BeautifulSoup(response.text, "html.parser")
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    links = []
+    pdf_links = 0
+    seen_likely_urls = set()
+    likely_links = []
+
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor.get("href") or "").strip()
+        if not href:
+            continue
+        text = anchor.get_text(" ", strip=True)
+        absolute_url = urljoin(response.url or source_url, href)
+        links.append(absolute_url)
+
+        if ".pdf" in href.lower() or "pdf" in text.lower():
+            pdf_links += 1
+
+        if link_is_likely_document(text, href) and absolute_url not in seen_likely_urls and len(likely_links) < 20:
+            seen_likely_urls.add(absolute_url)
+            label = text if text else absolute_url
+            likely_links.append(f"{label} -> {absolute_url}")
+
+    likely_links = likely_links[:20]
+    content_hash = hashlib.sha256(response.text.encode("utf-8")).hexdigest()
+    return {
+        "page_title": title,
+        "total_links": len(links),
+        "pdf_links": pdf_links,
+        "likely_link_count": len(likely_links),
+        "likely_links": "\n".join(likely_links),
+        "content_hash": content_hash,
+    }
+
+
+def classify_source_check(status_code: int | None, content_type: str, final_url: str, likely_link_count: int, error: str) -> str:
+    if error or status_code != 200:
+        return "FAILED"
+    if is_document_response(content_type, final_url):
+        return "PDF_OR_DOCUMENT"
+    if likely_link_count > 0:
+        return "OK"
+    return "REVIEW"
+
+
+def run_source_check(row: pd.Series) -> dict:
+    checked_at = datetime.now().isoformat(timespec="seconds")
+    programme = str(row.get("program_name", ""))
+    source_url = clean_url(row.get("source_check_url") or row.get("method_source_url") or row.get("official_website"))
+
+    result = {
+        "checked_at": checked_at,
+        "program_name": programme,
+        "source_url": source_url,
+        "status_code": "",
+        "final_url": "",
+        "content_type": "",
+        "response_size_bytes": "",
+        "page_title": "",
+        "total_links": 0,
+        "pdf_links": 0,
+        "likely_link_count": 0,
+        "likely_links": "",
+        "check_status": "FAILED",
+        "content_hash": "",
+        "error": "",
+    }
+
+    if requests is None or BeautifulSoup is None:
+        result["error"] = "Missing dependency. Install requests and beautifulsoup4."
+        return result
+
+    if not is_fetchable_url(source_url):
+        result["error"] = "Source URL is missing or is not an HTTP/HTTPS URL."
+        return result
+
+    try:
+        response = requests.get(
+            source_url,
+            headers={"User-Agent": POLITE_USER_AGENT},
+            allow_redirects=True,
+            timeout=SOURCE_CHECK_TIMEOUT_SECONDS,
+        )
+        content_type = response.headers.get("content-type", "")
+        result.update(
+            {
+                "status_code": response.status_code,
+                "final_url": response.url,
+                "content_type": content_type,
+                "response_size_bytes": len(response.content or b""),
+            }
+        )
+
+        if response.status_code == 200 and "html" in content_type.lower():
+            result.update(parse_html_source(response, source_url))
+
+        result["check_status"] = classify_source_check(
+            response.status_code,
+            content_type,
+            response.url,
+            int(result.get("likely_link_count") or 0),
+            "",
+        )
+    except requests.RequestException as exc:
+        result["error"] = str(exc)
+        result["check_status"] = "FAILED"
+
+    return result
+
+
+def fetch_public_source(url: str, program_name: str, allow_insecure_ssl: bool = False):
+    if requests is None or BeautifulSoup is None:
+        return None, make_extraction_error(
+            program_name,
+            url,
+            "missing_dependency",
+            "Missing dependency. Install requests and beautifulsoup4.",
+            "Install dependencies from requirements.txt.",
+        )
+    if not is_fetchable_url(url):
+        return None, make_extraction_error(
+            program_name,
+            url,
+            "invalid_url",
+            "Source URL is missing or is not an HTTP/HTTPS URL.",
+            "Check the programme source profile.",
+        )
+    try:
+        response = requests.get(
+            url,
+            headers={"User-Agent": POLITE_USER_AGENT},
+            allow_redirects=True,
+            timeout=SOURCE_CHECK_TIMEOUT_SECONDS,
+            verify=not allow_insecure_ssl,
+        )
+    except requests.exceptions.SSLError as exc:
+        message = str(exc)
+        if "CERTIFICATE_VERIFY_FAILED" in message:
+            message = (
+                "SSL certificate verification failed. The source may have an expired or misconfigured "
+                "certificate. Open manually in browser or retry later."
+            )
+        return None, make_extraction_error(
+            program_name,
+            url,
+            "ssl_certificate_error",
+            message,
+            "Open manually in browser, retry later, or use insecure SSL only for analyst testing.",
+        )
+    except requests.RequestException as exc:
+        return None, make_extraction_error(
+            program_name,
+            url,
+            "request_failed",
+            str(exc),
+            "Check source reachability manually or retry later.",
+        )
+    if response.status_code != 200:
+        return response, make_extraction_error(
+            program_name,
+            response.url or url,
+            "non_200_status",
+            f"Non-200 status: {response.status_code}",
+            "Open manually in browser and confirm the source URL.",
+        )
+    if "html" not in response.headers.get("content-type", "").lower():
+        return response, make_extraction_error(
+            program_name,
+            response.url or url,
+            "non_html_source",
+            "Source is reachable but is not an HTML catalogue page.",
+            "Review the document manually; linked documents are not fetched by this prototype.",
+        )
+    return response, ""
+
+
+def extract_code(text: str, preferred: str = "") -> str:
+    patterns = []
+    if preferred == "icr":
+        patterns = [CODE_PATTERNS["icr"]]
+    elif preferred == "aci":
+        patterns = [CODE_PATTERNS["aci"], CODE_PATTERNS["cdm"]]
+    else:
+        patterns = [CODE_PATTERNS["icr"], CODE_PATTERNS["aci"], CODE_PATTERNS["cdm"]]
+    for pattern in patterns:
+        match = pattern.search(text or "")
+        if match:
+            return normalize_text(match.group(0)).replace(" ", "-").upper()
+    return ""
+
+
+def extract_version(text: str) -> str:
+    match = re.search(r"\b(?:version|ver\.?|v)\s*[:#-]?\s*(\d+(?:\.\d+)*)\b", text or "", re.IGNORECASE)
+    return f"v{match.group(1)}" if match else ""
+
+
+def extract_status(text: str) -> str:
+    status_terms = [
+        "approved",
+        "active",
+        "valid",
+        "draft",
+        "consultation",
+        "withdrawn",
+        "retired",
+        "inactive",
+        "under development",
+        "superseded",
+    ]
+    text_l = str(text or "").lower()
+    for term in status_terms:
+        if term in text_l:
+            return term.title()
+    return ""
+
+
+def clean_candidate_name(text: str, code: str = "") -> str:
+    name = normalize_text(text)
+    if code:
+        name = re.sub(re.escape(code), "", name, flags=re.IGNORECASE)
+        name = re.sub(re.escape(code.replace("-", " ")), "", name, flags=re.IGNORECASE)
+    name = re.sub(r"^(download|view|open|read|pdf|document)\b\s*[:|-]?", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"\s*[-|]\s*$", "", name).strip(" :-")
+    return normalize_text(name)
+
+
+def clean_icr_methodology_title(text: str, code: str = "") -> str:
+    title = clean_candidate_name(text, code)
+    title = re.sub(r"\b(approved methodologies|approved icr methodologies|under development|icr methodologies|methodology development)\b", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\b(previous|next|international carbon registry|documentation|icr program)\b", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\b(approved|active|valid|draft|consultation|under development)\b", "", title, flags=re.IGNORECASE)
+    title = normalize_text(title.strip(" :-|"))
+    if not is_plausible_icr_methodology_title(title):
+        return ""
+    return title
+
+
+def is_plausible_icr_methodology_title(title: str) -> bool:
+    value = normalize_text(title)
+    value_l = value.lower().strip(" :-|")
+    if not value or looks_like_url(value):
+        return False
+    if value_l in ICR_GENERIC_TITLE_LABELS or value_l in GENERIC_NAV_TERMS:
+        return False
+    if any(value_l == term or value_l.startswith(f"{term}:") for term in ICR_GENERIC_TITLE_LABELS):
+        return False
+    if value_l.startswith(("and ", "or ")):
+        return False
+    if extract_status(value) or extract_version(value):
+        return False
+    if re.fullmatch(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}", value_l):
+        return False
+    alpha_words = re.findall(r"[a-zA-Z][a-zA-Z-]{2,}", value)
+    if len(value) < 12 or len(alpha_words) < 2:
+        return False
+    return True
+
+
+def icr_code_pattern(code: str):
+    return re.compile(re.escape(code).replace(r"\ ", r"\s*").replace(r"\-", r"[-\s]?"), re.IGNORECASE)
+
+
+def icr_title_from_code_block(text: str, code: str) -> tuple[str, bool]:
+    code_pattern = icr_code_pattern(code)
+    if not code_pattern.search(text or ""):
+        return "", False
+    title = clean_icr_methodology_title(text, code)
+    if title:
+        return title, False
+    return "", True
+
+
+def title_from_icr_detail_page(response_text: str, code: str) -> tuple[str, str, int]:
+    soup = BeautifulSoup(response_text, "html.parser")
+    code_pattern = icr_code_pattern(code)
+    suspicious_rejections = 0
+
+    h1 = soup.find("h1")
+    if h1:
+        title, rejected = icr_title_from_code_block(h1.get_text(" ", strip=True), code)
+        suspicious_rejections += int(rejected)
+        if title:
+            return title, "detail page h1", suspicious_rejections
+
+    page_title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    title, rejected = icr_title_from_code_block(page_title, code)
+    suspicious_rejections += int(rejected)
+    if title:
+        return title, "detail page title", suspicious_rejections
+
+    for heading in soup.find_all(["h2", "h3"]):
+        heading_text = normalize_text(heading.get_text(" ", strip=True))
+        sibling_text = ""
+        for sibling in heading.find_next_siblings(limit=3):
+            sibling_text = normalize_text(f"{sibling_text} {sibling.get_text(' ', strip=True)}")
+        context = normalize_text(f"{heading_text} {sibling_text}")
+        if code_pattern.search(context):
+            title, rejected = icr_title_from_code_block(context, code)
+            suspicious_rejections += int(rejected)
+            if title:
+                return title, "detail page heading near code", suspicious_rejections
+
+    visible_lines = [
+        normalize_text(line)
+        for line in soup.get_text("\n", strip=True).splitlines()
+        if normalize_text(line)
+    ]
+    for line in visible_lines:
+        if code_pattern.search(line):
+            title, rejected = icr_title_from_code_block(line, code)
+            suspicious_rejections += int(rejected)
+            if title:
+                return title, "detail page text line containing code", suspicious_rejections
+
+    return "", "", suspicious_rejections
+
+
+def fetch_icr_detail_title(document_url: str, code: str, allow_insecure_ssl: bool) -> tuple[str, str, dict | None, bool, int]:
+    url = clean_url(document_url)
+    if not is_fetchable_url(url):
+        return "", "", make_extraction_error(
+            "International Carbon Registry / ICR",
+            url,
+            "invalid_detail_url",
+            "ICR detail URL is missing or is not an HTTP/HTTPS URL.",
+            "Review the index-page candidate manually.",
+        ), False, 0
+    if is_pdf_or_document_url(url):
+        return "", "", None, False, 0
+    try:
+        response = requests.get(
+            url,
+            headers={"User-Agent": POLITE_USER_AGENT},
+            allow_redirects=True,
+            timeout=SOURCE_CHECK_TIMEOUT_SECONDS,
+            verify=not allow_insecure_ssl,
+        )
+    except requests.RequestException as exc:
+        return "", "", make_extraction_error(
+            "International Carbon Registry / ICR",
+            url,
+            "icr_detail_fetch_failed",
+            str(exc),
+            "Open the detail page manually or retry later.",
+        ), False, 0
+    if response.status_code != 200:
+        return "", "", make_extraction_error(
+            "International Carbon Registry / ICR",
+            response.url or url,
+            "icr_detail_non_200_status",
+            f"Non-200 status: {response.status_code}",
+            "Open the detail page manually or retry later.",
+        ), False, 0
+    if "html" not in response.headers.get("content-type", "").lower():
+        return "", "", None, False, 0
+    title, source, suspicious_rejections = title_from_icr_detail_page(response.text, code)
+    return title, source, None, True, suspicious_rejections
+
+
+def enrich_icr_candidates_from_detail_pages(
+    candidates: list[dict],
+    allow_insecure_ssl: bool,
+) -> tuple[list[dict], list[dict], dict[str, int]]:
+    enriched = []
+    errors = []
+    metrics = {
+        "icr_candidates_found": 0,
+        "icr_detail_pages_fetched": 0,
+        "icr_titles_extracted": 0,
+        "icr_titles_still_requiring_review": 0,
+        "icr_fetch_failures": 0,
+        "icr_suspicious_titles_rejected": 0,
+    }
+
+    for candidate in candidates:
+        is_icr_methodunit = (
+            candidate.get("candidate_type") == "methodunit_candidate"
+            and bool(CODE_PATTERNS["icr"].search(candidate.get("methodunit_code", "")))
+        )
+        if not is_icr_methodunit:
+            enriched.append(candidate)
+            continue
+
+        metrics["icr_candidates_found"] += 1
+        existing_title = normalize_text(candidate.get("methodunit_name", ""))
+        document_url = clean_url(candidate.get("document_url", ""))
+        code = normalize_text(candidate.get("methodunit_code", ""))
+
+        if existing_title and existing_title != "Title requires review" and not is_plausible_icr_methodology_title(existing_title):
+            candidate["methodunit_name"] = "Title requires review"
+            existing_title = "Title requires review"
+            candidate["confidence"] = "medium"
+            metrics["icr_suspicious_titles_rejected"] += 1
+
+        if existing_title and existing_title != "Title requires review":
+            candidate["notes"] = normalize_text(f"{candidate.get('notes', '')} Title from index page.")
+
+        if document_url:
+            detail_title, detail_source, error, fetched, suspicious_rejections = fetch_icr_detail_title(
+                document_url,
+                code,
+                allow_insecure_ssl,
+            )
+            metrics["icr_suspicious_titles_rejected"] += suspicious_rejections
+            if fetched:
+                metrics["icr_detail_pages_fetched"] += 1
+            if error:
+                metrics["icr_fetch_failures"] += 1
+                errors.append(error)
+            if detail_title:
+                candidate["methodunit_name"] = detail_title
+                candidate["notes"] = normalize_text(f"{candidate.get('notes', '')} Title enriched from {detail_source}.")
+                if candidate.get("methodunit_code") and is_plausible_icr_methodology_title(detail_title) and candidate.get("document_url"):
+                    candidate["confidence"] = "high"
+                else:
+                    candidate["confidence"] = "medium"
+                metrics["icr_titles_extracted"] += 1
+
+        if not normalize_text(candidate.get("methodunit_name", "")) or candidate.get("methodunit_name") == "Title requires review":
+            candidate["methodunit_name"] = "Title requires review"
+            candidate["confidence"] = "medium"
+            candidate["notes"] = "M-ICR code found; title not confidently extracted"
+            metrics["icr_titles_still_requiring_review"] += 1
+
+        enriched.append(candidate)
+
+    return enriched, errors, metrics
+
+
+def table_cell_is_metadata(header: str, value: str) -> bool:
+    header_l = header.lower()
+    value_l = normalize_text(value).lower()
+    if not value_l:
+        return True
+    if any(term in header_l for term in ["code", "status", "version", "sector", "category", "date", "link"]):
+        return True
+    if extract_status(value) or extract_version(value) or looks_like_url(value):
+        return True
+    return False
+
+
+def infer_icr_title_from_cells(headers: list[str], cell_texts: list[str], row_text: str, code: str) -> str:
+    for header, value in zip(headers, cell_texts):
+        if any(term in header for term in ["title", "name", "methodology"]):
+            title = clean_icr_methodology_title(value, code)
+            if title:
+                return title
+    for header, value in zip(headers, cell_texts):
+        if not table_cell_is_metadata(header, value):
+            title = clean_icr_methodology_title(value, code)
+            if title and len(title) > 5:
+                return title
+    title = clean_icr_methodology_title(row_text, code)
+    return title
+
+
+def make_candidate(
+    profile: dict,
+    methodunit_code: str,
+    methodunit_name: str,
+    unit_type: str,
+    sector: str,
+    version: str,
+    status: str,
+    source_url: str,
+    document_url: str,
+    extraction_method: str,
+    confidence: str,
+    notes: str,
+) -> dict:
+    return {
+        "program_id": str(profile.get("program_id", "")),
+        "program_name": str(profile.get("program_name", "")),
+        "methodunit_code": normalize_text(methodunit_code),
+        "methodunit_name": normalize_text(methodunit_name),
+        "unit_type": normalize_text(unit_type),
+        "candidate_type": "",
+        "classification_reason": "",
+        "sector": normalize_text(sector),
+        "version": normalize_text(version),
+        "status": normalize_text(status),
+        "source_url": clean_url(source_url),
+        "document_url": clean_url(document_url),
+        "extraction_method": extraction_method,
+        "confidence": confidence,
+        "review_status": "pending_review",
+        "extracted_at": datetime.now().isoformat(timespec="seconds"),
+        "notes": normalize_text(notes),
+    }
+
+
+def candidate_from_text_and_link(
+    profile: dict,
+    text: str,
+    href: str,
+    source_url: str,
+    source_kind: str,
+    unit_type: str,
+    extraction_method: str,
+    notes: str,
+) -> dict | None:
+    combined = normalize_text(f"{text} {href}")
+    preferred = "icr" if source_kind == "icr" else "aci" if source_kind == "aci" else ""
+    code = extract_code(combined, preferred)
+    name = clean_candidate_name(text, code)
+    document_url = urljoin(source_url, href) if href else ""
+    if not name and not code and not document_url:
+        return None
+    if source_kind == "icr":
+        name = clean_icr_methodology_title(text, code)
+        if not name and code:
+            name = "Title requires review"
+        elif not name and not code:
+            name = ""
+    elif not name and document_url:
+        name = document_url
+    status = extract_status(combined)
+    version = extract_version(combined)
+    if source_kind == "aci" and CODE_PATTERNS["cdm"].search(combined):
+        unit_type = "adopted_external_method"
+        notes = "Appears to be adopted from CDM."
+    confidence = "high" if name and document_url and (code or source_kind == "car") else "medium"
+    if source_kind == "icr" and code and is_plausible_icr_methodology_title(name) and document_url:
+        confidence = "high"
+    elif source_kind == "icr" and code:
+        confidence = "medium"
+    return make_candidate(
+        profile,
+        code,
+        name,
+        unit_type,
+        "",
+        version,
+        status,
+        source_url,
+        document_url,
+        extraction_method,
+        confidence,
+        notes,
+    )
+
+
+def extract_table_candidates(profile: dict, soup, source_url: str, source_kind: str, unit_type: str, notes: str) -> list[dict]:
+    candidates = []
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if not rows:
+            continue
+        headers = [normalize_text(cell.get_text(" ", strip=True)).lower() for cell in rows[0].find_all(["th", "td"])]
+        for row in rows[1:]:
+            cells = row.find_all(["td", "th"])
+            if not cells:
+                continue
+            cell_texts = [normalize_text(cell.get_text(" ", strip=True)) for cell in cells]
+            row_text = normalize_text(" ".join(cell_texts))
+            if not row_text:
+                continue
+            row_link = ""
+            for anchor in row.find_all("a", href=True):
+                if should_capture_source_link(anchor.get_text(" ", strip=True), anchor.get("href"), source_kind):
+                    row_link = urljoin(source_url, anchor.get("href"))
+                    break
+
+            code = extract_code(row_text, "icr" if source_kind == "icr" else "aci" if source_kind == "aci" else "")
+            status = extract_status(row_text)
+            version = extract_version(row_text)
+            sector = ""
+            title = ""
+            for header, value in zip(headers, cell_texts):
+                if not value:
+                    continue
+                if any(term in header for term in ["title", "name", "methodology", "protocol"]):
+                    title = value
+                elif "sector" in header or "category" in header:
+                    sector = value
+                elif "status" in header and not status:
+                    status = value
+                elif "version" in header and not version:
+                    version = value
+                elif "code" in header and not code:
+                    code = extract_code(value) or value
+            if source_kind == "icr":
+                title = infer_icr_title_from_cells(headers, cell_texts, row_text, code)
+            elif not title:
+                title = next((value for value in cell_texts if value and value != code and len(value) > 5), row_text)
+            if source_kind == "aci" and CODE_PATTERNS["cdm"].search(row_text):
+                candidate_unit_type = "adopted_external_method"
+                candidate_notes = "Appears to be adopted from CDM."
+            else:
+                candidate_unit_type = unit_type
+                candidate_notes = notes
+            candidate_name = clean_icr_methodology_title(title, code) if source_kind == "icr" else clean_candidate_name(title, code)
+            if source_kind == "icr" and code and not candidate_name:
+                candidate_name = "Title requires review"
+                candidate_notes = "M-ICR code found; title not confidently extracted"
+            confidence = "high" if candidate_name and candidate_name != "Title requires review" and (row_link or code) else "medium"
+            if source_kind == "icr" and code and is_plausible_icr_methodology_title(candidate_name) and row_link:
+                confidence = "high"
+            candidates.append(
+                make_candidate(
+                    profile,
+                    code,
+                    candidate_name,
+                    candidate_unit_type,
+                    sector,
+                    version,
+                    status,
+                    source_url,
+                    row_link,
+                    "table_parse",
+                    confidence,
+                    candidate_notes,
+                )
+            )
+    return candidates
+
+
+def extract_link_candidates(profile: dict, soup, source_url: str, source_kind: str, unit_type: str, notes: str) -> list[dict]:
+    candidates = []
+    for anchor in soup.find_all("a", href=True):
+        text = normalize_text(anchor.get_text(" ", strip=True))
+        href = anchor.get("href")
+        if not should_capture_source_link(text, href, source_kind):
+            continue
+        parse_text = text
+        if source_kind == "icr":
+            parent_text = ""
+            for parent_name in ["tr", "li", "p", "div"]:
+                parent = anchor.find_parent(parent_name)
+                candidate_text = normalize_text(parent.get_text(" ", strip=True)) if parent else ""
+                if candidate_text and len(candidate_text) < 500:
+                    parent_text = candidate_text
+                    break
+            if parent_text and CODE_PATTERNS["icr"].search(parent_text):
+                parse_text = parent_text
+        candidate = candidate_from_text_and_link(
+            profile,
+            parse_text,
+            href,
+            source_url,
+            source_kind,
+            unit_type,
+            "link_parse",
+            notes,
+        )
+        if candidate:
+            candidates.append(candidate)
+    return candidates
+
+
+def extract_climate_action_reserve_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = False) -> tuple[list[dict], dict | str]:
+    profile = get_program_profile(profiles, ["Climate Action Reserve"])
+    source_url = profile_source_url(profile)
+    response, error = fetch_public_source(source_url, "Climate Action Reserve", allow_insecure_ssl)
+    if error:
+        return [], error
+    soup = BeautifulSoup(response.text, "html.parser")
+    candidates = extract_table_candidates(
+        profile,
+        soup,
+        response.url,
+        "car",
+        "protocol",
+        "Candidate protocol from Climate Action Reserve public protocols page.",
+    )
+    candidates.extend(
+        extract_link_candidates(
+            profile,
+            soup,
+            response.url,
+            "car",
+            "protocol",
+            "Candidate protocol from Climate Action Reserve public protocols page.",
+        )
+    )
+    return apply_candidate_classification(candidates, "car"), ""
+
+
+def extract_icr_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = False) -> tuple[list[dict], dict | str]:
+    profile = get_program_profile(profiles, ["International Carbon Registry (ICR)", "International Carbon Registry"])
+    source_url = profile_source_url(profile)
+    response, error = fetch_public_source(source_url, "International Carbon Registry / ICR", allow_insecure_ssl)
+    if error:
+        return [], error
+    soup = BeautifulSoup(response.text, "html.parser")
+    candidates = extract_table_candidates(
+        profile,
+        soup,
+        response.url,
+        "icr",
+        "methodology",
+        "Candidate methodology from ICR public methodology page.",
+    )
+    candidates.extend(
+        extract_link_candidates(
+            profile,
+            soup,
+            response.url,
+            "icr",
+            "methodology",
+            "Candidate methodology from ICR public methodology page.",
+        )
+    )
+    classified = apply_candidate_classification(candidates, "icr")
+    enriched, detail_errors, metrics = enrich_icr_candidates_from_detail_pages(classified, allow_insecure_ssl)
+    return enriched, detail_errors, metrics
+
+
+def extract_asia_carbon_institute_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = False) -> tuple[list[dict], dict | str]:
+    profile = get_program_profile(profiles, ["Asia Carbon Institute"])
+    source_url = profile_source_url(profile)
+    response, error = fetch_public_source(source_url, "Asia Carbon Institute", allow_insecure_ssl)
+    if error:
+        return [], error
+    soup = BeautifulSoup(response.text, "html.parser")
+    candidates = extract_table_candidates(
+        profile,
+        soup,
+        response.url,
+        "aci",
+        "methodology",
+        "Appears to be ACI-native unless the code indicates an adopted CDM method.",
+    )
+    candidates.extend(
+        extract_link_candidates(
+            profile,
+            soup,
+            response.url,
+            "aci",
+            "methodology",
+            "Appears to be ACI-native unless the code indicates an adopted CDM method.",
+        )
+    )
+    return apply_candidate_classification(candidates, "aci"), ""
+
+
+def clean_cfc_title(text: str) -> str:
+    title = normalize_text(text)
+    title = re.sub(r"\b(download|view|open|read|pdf|document)\b\s*[:|-]?", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\s*[-|]\s*(city forest credits|carbon credits|urban forest carbon registry).*$", "", title, flags=re.IGNORECASE)
+    return normalize_text(title.strip(" :-|"))
+
+
+def is_likely_cfc_methodunit(text: str, href: str) -> bool:
+    combined = f"{normalize_text(text)} {href}".lower()
+    if any(term in combined for term in SUPPORTING_DOCUMENT_TERMS + DEVELOPMENT_PAGE_TERMS):
+        return False
+    if any(term in combined for term in ["blog", "news", "press", "contact", "donate", "login", "webinar"]):
+        return False
+    if "protocol" in combined and any(term in combined for term in ["preservation", "afforestation", "reforestation", "carbon"]):
+        return True
+    if "city forest credits standard" in combined:
+        return True
+    if "standard" in combined and any(term in combined for term in ["city forest", "carbon", "credit"]):
+        return True
+    return False
+
+
+def is_relevant_cfc_supporting_link(text: str, href: str) -> bool:
+    combined = f"{normalize_text(text)} {href}".lower()
+    if not combined.strip():
+        return False
+    if any(term in combined for term in SUPPORTING_DOCUMENT_TERMS + DEVELOPMENT_PAGE_TERMS):
+        return True
+    if any(term in combined for term in ["protocol", "standard", "carbon", "credit", ".pdf", "guidance", "template"]):
+        return True
+    return False
+
+
+def extract_cfc_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = False) -> tuple[list[dict], dict | str, dict[str, int]]:
+    profile = get_program_profile(profiles, ["City Forest Credits"])
+    source_url = profile_source_url(profile)
+    response, error = fetch_public_source(source_url, "City Forest Credits", allow_insecure_ssl)
+    metrics = {
+        "cfc_records_found": 0,
+        "cfc_document_links_found": 0,
+        "cfc_supporting_links_found": 0,
+        "cfc_records_missing_version": 0,
+        "cfc_fetch_failures": 0,
+    }
+    if error:
+        metrics["cfc_fetch_failures"] = 1
+        return [], error, metrics
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    candidates = []
+    seen_links = set()
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor.get("href") or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        link_text = normalize_text(anchor.get_text(" ", strip=True))
+        document_url = urljoin(response.url, href)
+        link_key = document_url.lower()
+        if link_key in seen_links:
+            continue
+        seen_links.add(link_key)
+
+        if is_pdf_or_document_url(document_url) or ".pdf" in href.lower():
+            metrics["cfc_document_links_found"] += 1
+
+        title = clean_cfc_title(link_text)
+        if not title:
+            title = clean_cfc_title(Path(urlparse(document_url).path).stem.replace("-", " ").replace("_", " "))
+        version = extract_version(f"{link_text} {href}")
+
+        if is_likely_cfc_methodunit(link_text, href):
+            unit_type = "Standard" if "standard" in f"{title} {href}".lower() and "protocol" not in f"{title} {href}".lower() else "Protocol"
+            confidence = "high" if title and document_url else "medium"
+            if not version:
+                metrics["cfc_records_missing_version"] += 1
+            metrics["cfc_records_found"] += 1
+            candidates.append(
+                make_candidate(
+                    profile,
+                    "",
+                    title,
+                    unit_type,
+                    "",
+                    version,
+                    "pending/public source",
+                    response.url,
+                    document_url,
+                    "cfc_document_link_parse",
+                    confidence,
+                    "Extracted from the City Forest Credits carbon protocols page; linked documents are discovered but not fully parsed.",
+                )
+            )
+            candidates[-1]["candidate_type"] = "methodunit_candidate"
+            candidates[-1]["classification_reason"] = "City Forest Credits protocol/standard document link detected."
+        elif is_relevant_cfc_supporting_link(link_text, href):
+            metrics["cfc_supporting_links_found"] += 1
+            candidates.append(
+                make_candidate(
+                    profile,
+                    "",
+                    title or document_url,
+                    "supporting_link",
+                    "",
+                    version,
+                    "",
+                    response.url,
+                    document_url,
+                    "cfc_supporting_link_parse",
+                    "medium",
+                    "Supporting link found on the City Forest Credits carbon protocols page; not treated as a methodology/protocol record.",
+                )
+            )
+            candidates[-1]["candidate_type"] = "supporting_document"
+            candidates[-1]["classification_reason"] = "City Forest Credits supporting or non-protocol link."
+
+    return dedupe_candidates(candidates), "", metrics
+
+
+def first_url_from_text(value: str) -> str:
+    match = re.search(r"https?://[^\s,\"']+", str(value or ""))
+    return clean_url(match.group(0)) if match else ""
+
+
+def artisan_source_url(profile: dict) -> str:
+    for column in ["method_source_url", "official_website", "registry_url", "evidence_urls"]:
+        url = first_url_from_text(profile.get(column, ""))
+        if url and not is_pdf_or_document_url(url):
+            return url
+    return ARTISAN_C_SINK_FALLBACK_SOURCE_URL
+
+
+def is_artisan_standard_link(text: str, href: str) -> bool:
+    combined = f"{normalize_text(text)} {href}".lower()
+    return (
+        "artisan c-sink" in combined
+        and any(term in combined for term in ["standard", "guideline", "global-artisan-c-sink", "global artisan c-sink"])
+        and any(term in combined for term in [".pdf", ".doc", "download", "media"])
+    )
+
+
+def is_artisan_supporting_link(text: str, href: str) -> bool:
+    combined = f"{normalize_text(text)} {href}".lower()
+    return any(
+        term in combined
+        for term in [
+            "clarification",
+            "faq",
+            "guidance",
+            "document",
+            "form",
+            "annex",
+            "update",
+            "positive list",
+            "calculation",
+            "manual",
+            "template",
+        ]
+    )
+
+
+def check_document_link_issue(program_name: str, document_url: str, source_url: str) -> dict | None:
+    if not document_url:
+        return make_extraction_error(
+            program_name,
+            source_url,
+            "document_link_missing",
+            "No stable standard PDF/document link was found on the public source page.",
+            "Open the source page manually and capture a stable document URL before catalogue ingestion.",
+        )
+    if requests is None:
+        return None
+    try:
+        response = requests.head(
+            document_url,
+            headers={"User-Agent": POLITE_USER_AGENT},
+            allow_redirects=False,
+            timeout=SOURCE_CHECK_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException as exc:
+        return make_extraction_error(
+            program_name,
+            document_url,
+            "document_link_check_failed",
+            str(exc),
+            "Open the document link manually and confirm whether a stable PDF/document URL is available.",
+        )
+    if 300 <= response.status_code < 400:
+        return make_extraction_error(
+            program_name,
+            document_url,
+            "document_link_redirected",
+            f"Document link returned redirect status {response.status_code}.",
+            "Capture the final stable PDF/document URL before catalogue ingestion.",
+        )
+    if response.status_code >= 400:
+        return make_extraction_error(
+            program_name,
+            document_url,
+            "document_link_non_200_status",
+            f"Document link returned status {response.status_code}.",
+            "Find a working standard PDF/document URL or preserve this as a source issue.",
+        )
+    return None
+
+
+def resolve_artisan_c_sink_source(profiles: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    profile = get_program_profile(profiles, ["Artisan C-sink", "Artisan C-Sink"])
+    if not profile:
+        profile = {"program_id": "", "program_name": "Artisan C-sink"}
+    program_name = "Artisan C-sink"
+    source_url = artisan_source_url(profile)
+    resolved_at = datetime.now().isoformat(timespec="seconds")
+    resolution = {
+        "programme": program_name,
+        "dedicated_methodology_page": "Partial / No separate methodology index",
+        "where_methodology_info_lives": "standard PDF + clarification documents",
+        "methodology_model": "single protocol/document family",
+        "recommended_catalogue_action": "capture-document-family",
+        "recommended_ingestion_mode": "semi-automated extraction or one-shot manual capture",
+        "review_status": "pending_review",
+        "evidence_url": source_url,
+        "resolved_at": resolved_at,
+    }
+
+    response, error = fetch_public_source(source_url, program_name)
+    errors = []
+    if error:
+        resolution["review_status"] = "needs_research"
+        errors.append(error)
+        return (
+            pd.DataFrame([resolution], columns=SOURCE_RESOLUTION_SCHEMA),
+            pd.DataFrame(columns=CANDIDATE_SCHEMA),
+            pd.DataFrame([{column: row.get(column, "") for column in EXTRACTION_ERROR_SCHEMA} for row in errors], columns=EXTRACTION_ERROR_SCHEMA),
+        )
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    standard_document_url = ""
+    supporting_candidates = []
+    seen_links = set()
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor.get("href") or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        link_text = normalize_text(anchor.get_text(" ", strip=True))
+        document_url = urljoin(response.url, href)
+        link_key = document_url.lower()
+        if link_key in seen_links:
+            continue
+        seen_links.add(link_key)
+
+        if not standard_document_url and is_artisan_standard_link(link_text, href):
+            standard_document_url = document_url
+            continue
+
+        if is_artisan_supporting_link(link_text, href):
+            supporting = make_candidate(
+                profile,
+                "",
+                link_text or Path(urlparse(document_url).path).stem.replace("-", " ").replace("_", " "),
+                "supporting_link",
+                "",
+                extract_version(f"{link_text} {href}"),
+                "",
+                response.url,
+                document_url,
+                "source_resolution_link_parse",
+                "medium",
+                "Clarification or supporting document preserved during Artisan C-sink source resolution.",
+            )
+            supporting["candidate_type"] = "supporting_document"
+            supporting["classification_reason"] = "Artisan C-sink clarification/supporting document, not a methodology record."
+            supporting_candidates.append(supporting)
+
+    document_issue = check_document_link_issue(program_name, standard_document_url, response.url)
+    if document_issue:
+        errors.append(document_issue)
+
+    methodunit = make_candidate(
+        profile,
+        "",
+        "Global Artisan C-Sink Standard",
+        "Standard / Document family",
+        "",
+        "",
+        "pending/public source",
+        response.url,
+        standard_document_url,
+        "source_resolution_document_family",
+        "high" if standard_document_url and not document_issue else "medium",
+        "No separate methodology index; captured as document-family source resolution.",
+    )
+    methodunit["candidate_type"] = "methodunit_candidate"
+    methodunit["classification_reason"] = "No separate methodology index; standard treated as document-family MethodUnit candidate."
+
+    candidates = dedupe_candidates([methodunit, *supporting_candidates])
+    return (
+        pd.DataFrame([resolution], columns=SOURCE_RESOLUTION_SCHEMA),
+        apply_output_safeguards(pd.DataFrame([{column: candidate.get(column, "") for column in CANDIDATE_SCHEMA} for candidate in candidates], columns=CANDIDATE_SCHEMA)),
+        pd.DataFrame([{column: row.get(column, "") for column in EXTRACTION_ERROR_SCHEMA} for row in errors], columns=EXTRACTION_ERROR_SCHEMA),
+    )
