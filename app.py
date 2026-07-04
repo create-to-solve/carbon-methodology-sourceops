@@ -29,6 +29,7 @@ from pipeline import (
     current_extraction_errors,
     current_live_source_failures,
     current_methodunit_candidates,
+    current_source_resolution_results,
     derive_onboarding_plan,
     ensure_columns,
     load_data,
@@ -1221,21 +1222,29 @@ def export_page(data: dict[str, pd.DataFrame]) -> None:
         "extraction_errors",
         EXTRACTION_ERROR_SCHEMA,
     )
+    source_resolution, source_resolution_source = session_or_output(
+        current_source_resolution_results(),
+        "source_resolution_results.csv",
+        "source_resolution_results",
+        SOURCE_RESOLUTION_SCHEMA,
+    )
     source_registry = data.get("source_profiles", pd.DataFrame())
     qa = data.get("qa_flags", pd.DataFrame())
     st.caption(
-        f"Export sources: records = {methodunit_source}; supporting links = {links_source}; extraction errors = {errors_source}."
+        f"Export sources: records = {methodunit_source}; supporting links = {links_source}; "
+        f"extraction errors = {errors_source}; source resolution = {source_resolution_source}."
     )
 
-    if methodunits.empty and links.empty and errors.empty:
+    if methodunits.empty and links.empty and errors.empty and source_resolution.empty:
         st.info(
-            "No extraction output is available yet. Open Workbench -> Extract from Sources, use Source Resolution, or run a quick Demo before returning here to export."
+            "No extraction or source-resolution output is available yet. Run a quick demo extraction or resolve Artisan C-sink before returning here to export."
         )
 
     downloads = [
         ("Current extracted methodology records", methodunits, "methodunit_candidates_review.csv"),
         ("Full Supporting Links", links, "extracted_source_links_full.csv"),
         ("Extraction errors", errors, "extraction_errors.csv"),
+        ("Source-resolution results", source_resolution, "source_resolution_results.csv"),
         ("Source Registry table", source_registry, "source_registry.csv"),
         ("QA flags", qa, "qa_flags.csv"),
     ]
@@ -1368,6 +1377,12 @@ def ingestion_workflow_page(data: dict[str, pd.DataFrame]) -> None:
     st.info(
         "Extraction is used when a source has a structured methodology/protocol page. "
         "Source Resolution is used when a source lacks a clean methodology page and must be classified before catalogue ingestion."
+    )
+    st.info(
+        "**Recommended demo path**\n\n"
+        "- Climate Action Reserve: clean table extraction.\n"
+        "- City Forest Credits: document/protocol-family extraction.\n"
+        "- Artisan C-sink: no clean methodology page, so use the Source Resolution case."
     )
     demo_tab, step1_tab, step2_tab, resolution_tab = st.tabs(
         ["Quick Demo", "Step 1: Source access check", "Step 2: Extract or resolve records", "Source Resolution"]

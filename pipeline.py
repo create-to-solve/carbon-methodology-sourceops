@@ -721,6 +721,10 @@ def current_extraction_errors() -> pd.DataFrame:
     return st.session_state.get("candidate_extraction_errors", pd.DataFrame(columns=EXTRACTION_ERROR_SCHEMA)).copy()
 
 
+def current_source_resolution_results() -> pd.DataFrame:
+    return st.session_state.get("source_resolution_results", pd.DataFrame(columns=SOURCE_RESOLUTION_SCHEMA)).copy()
+
+
 def current_live_source_failures() -> pd.DataFrame:
     checks = st.session_state.get("live_source_check_results", pd.DataFrame())
     if checks.empty or "check_status" not in checks.columns:
@@ -785,6 +789,7 @@ def save_timestamped_outputs(data: dict[str, pd.DataFrame]) -> list[Path]:
         f"methodunit_candidates_review_{timestamp}.csv": current_methodunit_candidates(),
         f"extracted_source_links_full_{timestamp}.csv": current_extracted_links(),
         f"extraction_errors_{timestamp}.csv": current_extraction_errors(),
+        f"source_resolution_results_{timestamp}.csv": current_source_resolution_results(),
         f"source_registry_{timestamp}.csv": data.get("source_profiles", pd.DataFrame()),
         f"qa_flags_{timestamp}.csv": data.get("qa_flags", pd.DataFrame()),
     }
