@@ -15,6 +15,8 @@ from pipeline import (
     CANDIDATE_SCHEMA,
     EXTRACTION_ERROR_SCHEMA,
     FILES,
+    SOURCE_RESOLUTION_AUDIT_FILE,
+    SOURCE_RESOLUTION_AUDIT_SCHEMA,
     SOURCE_RESOLUTION_SCHEMA,
     SUPPORTED_EXTRACTORS,
     add_record_readiness,
@@ -140,6 +142,7 @@ def sidebar_data_status(data: dict[str, pd.DataFrame]) -> None:
         for key, file_name in FILES.items():
             row_count = len(data.get(key, pd.DataFrame()))
             st.write(f"{file_name}: {row_count} rows")
+        st.write(f"{SOURCE_RESOLUTION_AUDIT_FILE}: {len(data.get('source_resolution_audit', pd.DataFrame()))} rows")
 
 
 def inline_filters(df: pd.DataFrame, filter_columns: list[str], key_prefix: str, defaults: dict[str, list[str]] | None = None) -> pd.DataFrame:
@@ -161,6 +164,117 @@ def inline_filters(df: pd.DataFrame, filter_columns: list[str], key_prefix: str,
             )
         if selected:
             filtered = filtered[filtered[filter_column].isin(selected)]
+    return filtered
+
+
+def source_resolution_audit_warnings(data: dict[str, pd.DataFrame]) -> None:
+    for warning in data.get("source_resolution_audit_warnings", []):
+        st.warning(warning)
+
+
+def audit_project_count(audit: pd.DataFrame) -> int:
+    if audit.empty or "project_count" not in audit.columns:
+        return 0
+    values = audit["project_count"].astype(str).str.replace(",", "", regex=False).str.strip()
+    return int(pd.to_numeric(values, errors="coerce").fillna(0).sum())
+
+
+def count_yes_or_partial(df: pd.DataFrame, column: str) -> int:
+    if df.empty or column not in df.columns:
+        return 0
+    normalized = df[column].astype(str).str.strip().str.lower()
+    return int(normalized.isin(["yes", "partial"]).sum())
+
+
+def count_yes(df: pd.DataFrame, column: str) -> int:
+    if df.empty or column not in df.columns:
+        return 0
+    return int(df[column].astype(str).str.strip().str.lower().eq("yes").sum())
+
+
+def source_resolution_audit_issue_rows(audit: pd.DataFrame) -> pd.DataFrame:
+    if audit.empty:
+        return audit.copy()
+    issue = audit.get("creates_issue_record", pd.Series("", index=audit.index)).astype(str).str.strip().str.lower().eq("yes")
+    review_status = audit.get("review_status", pd.Series("", index=audit.index)).astype(str).str.strip().str.lower()
+    review_issue = review_status.isin(["needs_research", "access_request", "unresolved", "parked"])
+    return audit[issue | review_issue].copy()
+
+
+def render_audit_summary(audit: pd.DataFrame, key_prefix: str) -> None:
+    metric_row(
+        [
+            ("Total audited sources", len(audit)),
+            ("Project count covered", audit_project_count(audit)),
+            ("Creates method record", count_yes_or_partial(audit, "creates_methodology_record")),
+            ("Creates issue record", count_yes(audit, "creates_issue_record")),
+        ]
+    )
+    left, right = st.columns(2)
+    with left:
+        st.caption("Recommended catalogue action")
+        show_dataframe(
+            value_counts_df(audit, "recommended_catalogue_action", "recommended_catalogue_action"),
+            f"{key_prefix}_action_counts",
+            height=220,
+        )
+    with right:
+        st.caption("Review status")
+        show_dataframe(
+            value_counts_df(audit, "review_status", "review_status"),
+            f"{key_prefix}_review_counts",
+            height=220,
+        )
+
+
+def render_source_resolution_audit_table(data: dict[str, pd.DataFrame], key_prefix: str) -> pd.DataFrame:
+    source_resolution_audit_warnings(data)
+    audit = data.get("source_resolution_audit", pd.DataFrame(columns=SOURCE_RESOLUTION_AUDIT_SCHEMA))
+    audit = audit.copy()
+    if audit.empty:
+        st.info("No mid-activity source-resolution audit rows are loaded.")
+        return audit
+
+    st.info(
+        "This audit does not mean all sources can be extracted. It classifies each source into an action: "
+        "automate, capture document family, store pointer, request access, derive from projects, or mark unresolved."
+    )
+    render_audit_summary(audit, f"{key_prefix}_summary")
+    filtered = inline_filters(
+        audit,
+        [
+            "recommended_catalogue_action",
+            "recommended_ingestion_mode",
+            "review_status",
+            "source_access_issue",
+            "confidence",
+        ],
+        key_prefix,
+    )
+    display_columns = [
+        "activity_tier",
+        "project_count",
+        "programme",
+        "official_website",
+        "source_resolves",
+        "dedicated_methodology_page",
+        "where_methodology_info_lives",
+        "methodology_model",
+        "approximate_count",
+        "recommended_catalogue_action",
+        "recommended_ingestion_mode",
+        "confidence",
+        "assessment_basis",
+        "source_access_issue",
+        "creates_methodology_record",
+        "creates_supporting_links",
+        "creates_issue_record",
+        "review_status",
+        "notes",
+        "last_verified",
+        "evidence_urls",
+    ]
+    show_dataframe(select_existing(filtered, display_columns), f"{key_prefix}_filtered", height=520)
     return filtered
 
 
@@ -790,6 +904,13 @@ def source_resolution_page(data: dict[str, pd.DataFrame]) -> None:
     )
     st.dataframe(comparison, hide_index=True, use_container_width=True)
 
+    st.subheader("Mid-Activity Source Resolution Audit")
+    st.write(
+        "This CSV is an evidence-backed decision layer for source resolution. It guides catalogue action, "
+        "but it is not approved catalogue truth and does not automatically create methodology records."
+    )
+    render_source_resolution_audit_table(data, "source_resolution_audit")
+
     st.subheader("Supported Source-Resolution Case")
     st.write(
         "Artisan C-sink is handled as a document-family case, not a normal table extractor. "
@@ -1046,6 +1167,31 @@ def qa_exceptions_page(data: dict[str, pd.DataFrame]) -> None:
         st.info("No current extracted records needing review are loaded.")
     else:
         show_dataframe(select_existing(review_needed, ["program_name", "methodunit_code", "methodunit_name", "confidence", "review_status", "notes"]), "qa_exceptions_review_needed", height=240)
+
+    st.subheader("Source-Resolution Audit Next Actions")
+    source_resolution_audit_warnings(data)
+    audit = data.get("source_resolution_audit", pd.DataFrame(columns=SOURCE_RESOLUTION_AUDIT_SCHEMA))
+    audit_issues = source_resolution_audit_issue_rows(audit)
+    if audit_issues.empty:
+        st.info("No source-resolution audit rows require issue records or special review status.")
+    else:
+        st.write(
+            "These rows come from the mid-activity source-resolution audit. Treat them as review issues or next-action items, "
+            "not approved methodology records."
+        )
+        display_columns = [
+            "programme",
+            "project_count",
+            "recommended_catalogue_action",
+            "recommended_ingestion_mode",
+            "review_status",
+            "source_access_issue",
+            "creates_issue_record",
+            "confidence",
+            "notes",
+            "evidence_urls",
+        ]
+        show_dataframe(select_existing(audit_issues, display_columns), "source_resolution_audit_next_actions", height=360)
 
 
 def export_page(data: dict[str, pd.DataFrame]) -> None:
@@ -1306,6 +1452,18 @@ def coverage_progress_page(data: dict[str, pd.DataFrame]) -> None:
         {"Programme / source": "American Carbon Registry (ACR)", "Current status": "URL repair first", "Extractor / source type": "catalogue-style HTML", "Current output": "n/a", "Issue / risk": "current URL not confirmed", "Recommended next action": "confirm or repair the source URL before building the extractor", "Suggested wave": "Wave 3"},
     ]
     st.dataframe(pd.DataFrame(tracker_rows), hide_index=True, use_container_width=True)
+
+    st.subheader("Mid-Activity Audit Coverage")
+    source_resolution_audit_warnings(data)
+    audit = data.get("source_resolution_audit", pd.DataFrame(columns=SOURCE_RESOLUTION_AUDIT_SCHEMA))
+    if audit.empty:
+        st.info("No mid-activity source-resolution audit rows are loaded.")
+    else:
+        st.write(
+            "This summarizes the audit decision layer for mid-activity standards. "
+            "It guides onboarding actions and issue triage; it does not approve catalogue records."
+        )
+        render_audit_summary(audit, "coverage_mid_activity_audit")
 
     st.subheader("Onboarding Waves")
     section_note("Waves group sources by readiness and extraction strategy.")

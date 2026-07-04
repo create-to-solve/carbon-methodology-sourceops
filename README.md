@@ -65,6 +65,8 @@ The current implemented example is **Artisan C-sink**:
 
 The app fetches only the public source page, does not parse full PDFs, creates one pending-review document-family record, preserves clarification documents as Supporting Material, and logs missing or unstable document links as Issues. This directly addresses standards with one or a few methodologies where a full catalogue scraper would be unnecessary.
 
+The app also loads `data/source_resolution_audit_mid_activity.csv` when present. That file is a review-ready source-resolution audit for mid-activity standards, not approved catalogue truth. It classifies sources into catalogue actions such as automated extraction, document-family capture, adopted-method pointer, access request, project-derived review, unresolved, or parked. The Source Resolution and Coverage Progress pages summarize it, and Evidence & Review surfaces audit rows that need issue records or follow-up. Audit rows do not automatically generate methodology catalogue exports.
+
 ## Session-State Model
 
 The app treats extraction and source resolution as producer steps, and everything downstream as consumers of the latest outputs:
@@ -132,6 +134,7 @@ Expected input files under `data/`:
 - `extraction_waves_fixed.csv`
 - `qa_flags_fixed.csv`
 - `next_actions_fixed.csv`
+- `source_resolution_audit_mid_activity.csv` (optional but used for the mid-activity source-resolution audit layer)
 
 ## Outputs
 

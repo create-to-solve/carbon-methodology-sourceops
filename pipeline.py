@@ -18,6 +18,7 @@ FILES = {
     "qa_flags": "qa_flags_fixed.csv",
     "next_actions": "next_actions_fixed.csv",
 }
+SOURCE_RESOLUTION_AUDIT_FILE = "source_resolution_audit_mid_activity.csv"
 
 
 CANDIDATE_SCHEMA = [
@@ -57,6 +58,29 @@ SOURCE_RESOLUTION_SCHEMA = [
     "review_status",
     "evidence_url",
     "resolved_at",
+]
+SOURCE_RESOLUTION_AUDIT_SCHEMA = [
+    "activity_tier",
+    "project_count",
+    "programme",
+    "official_website",
+    "source_resolves",
+    "dedicated_methodology_page",
+    "where_methodology_info_lives",
+    "methodology_model",
+    "approximate_count",
+    "evidence_urls",
+    "recommended_catalogue_action",
+    "recommended_ingestion_mode",
+    "confidence",
+    "assessment_basis",
+    "source_access_issue",
+    "creates_methodology_record",
+    "creates_supporting_links",
+    "creates_issue_record",
+    "review_status",
+    "notes",
+    "last_verified",
 ]
 ALLOWED_CANDIDATE_TYPES = [
     "methodunit_candidate",
@@ -203,6 +227,30 @@ def load_csv(file_name: str) -> pd.DataFrame:
     return normalize_columns(pd.read_csv(path, dtype=str).fillna(""))
 
 
+def empty_source_resolution_audit() -> pd.DataFrame:
+    return pd.DataFrame(columns=SOURCE_RESOLUTION_AUDIT_SCHEMA)
+
+
+@st.cache_data(show_spinner=False)
+def load_source_resolution_audit() -> tuple[pd.DataFrame, list[str]]:
+    path = DATA_DIR / SOURCE_RESOLUTION_AUDIT_FILE
+    if not path.exists():
+        return empty_source_resolution_audit(), [f"Optional source-resolution audit file not found: {path}"]
+    try:
+        audit = normalize_columns(pd.read_csv(path, dtype=str).fillna(""))
+    except Exception as exc:  # noqa: BLE001 - app should stay usable and show a friendly warning.
+        return empty_source_resolution_audit(), [f"Could not read source-resolution audit CSV: {exc}"]
+
+    warnings = []
+    missing_columns = [column for column in SOURCE_RESOLUTION_AUDIT_SCHEMA if column not in audit.columns]
+    if missing_columns:
+        warnings.append(
+            "Source-resolution audit CSV is missing expected columns: " + ", ".join(missing_columns)
+        )
+        audit = ensure_columns(audit, SOURCE_RESOLUTION_AUDIT_SCHEMA)
+    return audit, warnings
+
+
 @st.cache_data(show_spinner=False)
 def as_csv_download(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
@@ -219,6 +267,9 @@ def load_data() -> dict[str, pd.DataFrame]:
         except Exception as exc:  # noqa: BLE001 - Streamlit should show useful load failures.
             st.error(f"Could not load {file_name}: {exc}")
             data[key] = pd.DataFrame()
+    audit, audit_warnings = load_source_resolution_audit()
+    data["source_resolution_audit"] = audit
+    data["source_resolution_audit_warnings"] = audit_warnings
     return data
 
 
