@@ -1207,6 +1207,307 @@ def extract_climate_forward_candidates(profiles: pd.DataFrame, allow_insecure_ss
     return dedupe_candidates(candidates), errors, metrics
 
 
+ACR_CANONICAL_SOURCE_URL = "https://acrcarbon.org/methodologies/approved-methodologies/"
+ACR_DOCUMENT_EXTENSIONS = (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".zip")
+ACR_INDEX_METHODOLOGY_HEADERS = ("methodology", "version")
+ACR_PRIMARY_ANCHOR_TEXTS = ("download the methodology",)
+
+
+def acr_source_url(profile: dict) -> str:
+    """Return the canonical acrcarbon.org page, falling back to it when the profile URL is stale."""
+    candidate = profile_source_url(profile)
+    if candidate and "acrcarbon.org/methodolog" in candidate.lower():
+        return candidate
+    return ACR_CANONICAL_SOURCE_URL
+
+
+def acr_is_document_href(href: str) -> bool:
+    href_l = (href or "").split("?", 1)[0].split("#", 1)[0].lower()
+    return href_l.endswith(ACR_DOCUMENT_EXTENSIONS)
+
+
+def parse_acr_index_row(row) -> dict:
+    cells = row.find_all(["td", "th"])
+    if len(cells) < 3:
+        return {}
+    sector = normalize_text(cells[0].get_text(" ", strip=True))
+    title = normalize_text(cells[1].get_text(" ", strip=True))
+    version = normalize_text(cells[2].get_text(" ", strip=True))
+    detail_url = ""
+    for anchor in row.find_all("a", href=True):
+        href = anchor.get("href", "").strip()
+        if href and "acrcarbon.org/methodology/" in href.lower():
+            detail_url = href.rstrip("/") + "/"
+            break
+    return {
+        "sector": sector,
+        "title": title,
+        "version": version,
+        "detail_url": detail_url,
+    }
+
+
+def acr_section_label(anchor) -> str:
+    """Return the nearest preceding <h3>/<h4>/<h2> heading text for an anchor, if any."""
+    heading = anchor.find_previous(["h4", "h3", "h2"])
+    if not heading:
+        return ""
+    return normalize_text(heading.get_text(" ", strip=True))
+
+
+def acr_classify_section(label: str) -> tuple[str, str]:
+    """Return (candidate_type, evidence_stage) for an anchor sitting under ``label``."""
+    label_l = (label or "").lower()
+    if "previous approved" in label_l:
+        return "supporting_document", "historical_version"
+    if "process documentation" in label_l:
+        return "supporting_document", "process_documentation"
+    if "reference document" in label_l:
+        return "supporting_document", "reference_document"
+    if "current approved" in label_l:
+        return "supporting_document", "current_version_supplement"
+    return "supporting_document", "unlabelled_document"
+
+
+def find_acr_primary_pdf(soup, response_url: str) -> str:
+    """Return the current-approved-version PDF URL, preferring the 'Download the methodology' anchor."""
+    for anchor in soup.find_all("a", href=True):
+        text = normalize_text(anchor.get_text(" ", strip=True)).lower()
+        href = anchor.get("href", "").strip()
+        if not href or not acr_is_document_href(href):
+            continue
+        if any(marker in text for marker in ACR_PRIMARY_ANCHOR_TEXTS):
+            return urljoin(response_url, href)
+    # Fallback: first PDF under a "Current Approved Version" heading that is not
+    # an errata / peer review / public comment / summary document.
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href", "").strip()
+        if not href or not acr_is_document_href(href):
+            continue
+        label = acr_section_label(anchor).lower()
+        if "current approved" not in label:
+            continue
+        text = normalize_text(anchor.get_text(" ", strip=True)).lower()
+        skip_terms = ("errata", "peer review", "public comment", "summary of changes", "reference", "calculator", "supplement")
+        if any(term in text for term in skip_terms):
+            continue
+        return urljoin(response_url, href)
+    return ""
+
+
+def collect_acr_detail_documents(
+    profile: dict,
+    methodology: dict,
+    response,
+    metrics: dict,
+) -> tuple[str, list[dict], list[dict]]:
+    """Fetch a detail page and split its document anchors into (primary_url, supporting[], errors[])."""
+    soup = BeautifulSoup(response.text, "html.parser")
+    primary_url = find_acr_primary_pdf(soup, response.url)
+    supporting: list[dict] = []
+    errors: list[dict] = []
+    seen_urls: set[str] = set()
+    if primary_url:
+        seen_urls.add(primary_url.lower())
+
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href", "").strip()
+        if not href or not acr_is_document_href(href):
+            continue
+        absolute = urljoin(response.url, href)
+        key = absolute.lower()
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        text = normalize_text(anchor.get_text(" ", strip=True)) or absolute
+        section_label = acr_section_label(anchor)
+        candidate_type, evidence_stage = acr_classify_section(section_label)
+        note = (
+            f"ACR detail-page supporting document for '{methodology['title']}' "
+            f"({section_label or 'unlabelled section'}); body not parsed."
+        )
+        candidate = make_candidate(
+            profile,
+            "",
+            text,
+            "supporting_document",
+            methodology.get("sector", ""),
+            methodology.get("version", ""),
+            "",
+            methodology.get("detail_url") or response.url,
+            absolute,
+            "acr_detail_document",
+            "medium",
+            note,
+        )
+        candidate["candidate_type"] = candidate_type
+        candidate["classification_reason"] = (
+            f"ACR detail-page document ({evidence_stage})."
+        )
+        # Best-effort evidence stage — CANDIDATE_SCHEMA has no evidence column,
+        # so we surface the stage through the notes for downstream review.
+        candidate["notes"] = append_note(candidate["notes"], f"evidence_stage: {evidence_stage}")
+        supporting.append(candidate)
+        metrics["acr_supporting_documents"] += 1
+        if evidence_stage == "historical_version":
+            metrics["acr_historical_documents"] += 1
+
+    if not primary_url:
+        errors.append(
+            make_extraction_error(
+                profile.get("program_name", "American Carbon Registry (ACR)"),
+                methodology.get("detail_url") or response.url,
+                "document_link_missing",
+                f"No current-approved-version PDF was identified on the detail page for '{methodology['title']}'.",
+                "Open the detail page and confirm which anchor represents the current approved methodology PDF.",
+            )
+        )
+        metrics["acr_primary_pdf_missing"] += 1
+    return primary_url, supporting, errors
+
+
+def extract_acr_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = False) -> tuple[list[dict], list[dict], dict[str, int]]:
+    """Extract approved-methodology records from the American Carbon Registry (ACR) public catalogue.
+
+    Reads the "Approved Methodologies" index table (columns: ANAB Sectoral
+    Scope, Methodology, Version), then follows each detail page to attach the
+    current-approved-version PDF as ``document_url``. Detail pages expose
+    ``Current Approved Version`` / ``Process Documentation`` / ``Previous
+    Approved Versions`` sections; anchors under those sections are captured as
+    supporting documents with an ``evidence_stage`` note (``current``,
+    ``process_documentation``, ``historical_version``, ``reference_document``).
+    Historical PDFs are never attached as the primary document. Detail-page
+    fetch failures produce an extraction error but do not drop the record.
+    """
+    profile = get_program_profile(profiles, ["American Carbon Registry (ACR)", "American Carbon Registry"])
+    metrics = {
+        "acr_records_found": 0,
+        "acr_detail_pages_fetched": 0,
+        "acr_detail_pages_failed": 0,
+        "acr_primary_pdf_attached": 0,
+        "acr_primary_pdf_missing": 0,
+        "acr_supporting_documents": 0,
+        "acr_historical_documents": 0,
+    }
+    errors: list[dict] = []
+    source_url = acr_source_url(profile)
+    response, error = fetch_public_source(source_url, "American Carbon Registry (ACR)", allow_insecure_ssl)
+    if error:
+        errors.append(error)
+        return [], errors, metrics
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    tables = soup.find_all("table")
+    if not tables:
+        errors.append(
+            make_extraction_error(
+                "American Carbon Registry (ACR)",
+                response.url,
+                "page_structure_changed",
+                "ACR approved methodologies page contains no <table> elements.",
+                "Open the page manually and update the extractor's table selector.",
+            )
+        )
+        return [], errors, metrics
+
+    methodology_table = find_table_by_headers(soup, ACR_INDEX_METHODOLOGY_HEADERS)
+    if methodology_table is None:
+        errors.append(
+            make_extraction_error(
+                "American Carbon Registry (ACR)",
+                response.url,
+                "page_structure_changed",
+                "ACR approved methodologies page no longer contains a table with 'Methodology' and 'Version' headers.",
+                "Open the source page manually and update the extractor's table selector.",
+            )
+        )
+        return [], errors, metrics
+
+    data_rows = methodology_table.find_all("tr")[1:]
+    if not data_rows:
+        errors.append(
+            make_extraction_error(
+                "American Carbon Registry (ACR)",
+                response.url,
+                "no_records_found",
+                "ACR approved methodologies table has a header but no data rows.",
+                "Confirm the source is still publishing approved methodologies.",
+            )
+        )
+        return [], errors, metrics
+
+    candidates: list[dict] = []
+    seen_dedupe_keys: set[tuple[str, str, str]] = set()
+    for row in data_rows:
+        methodology = parse_acr_index_row(row)
+        if not methodology or not methodology["title"]:
+            continue
+        key = (
+            methodology["title"].lower(),
+            methodology["version"].lower(),
+            methodology["detail_url"].lower(),
+        )
+        if key in seen_dedupe_keys:
+            continue
+        seen_dedupe_keys.add(key)
+
+        document_url = ""
+        notes = (
+            "Extracted from the American Carbon Registry approved methodologies index; "
+            "linked PDFs are captured but not fully parsed."
+        )
+        if methodology["detail_url"]:
+            detail_response, detail_error = fetch_public_source(
+                methodology["detail_url"], "American Carbon Registry (ACR)", allow_insecure_ssl
+            )
+            if detail_error:
+                metrics["acr_detail_pages_failed"] += 1
+                errors.append(detail_error)
+                notes += " Detail page fetch failed; primary PDF not attached."
+            else:
+                metrics["acr_detail_pages_fetched"] += 1
+                document_url, supporting, detail_errors = collect_acr_detail_documents(
+                    profile, methodology, detail_response, metrics
+                )
+                candidates.extend(supporting)
+                errors.extend(detail_errors)
+                if document_url:
+                    metrics["acr_primary_pdf_attached"] += 1
+        else:
+            errors.append(
+                make_extraction_error(
+                    "American Carbon Registry (ACR)",
+                    response.url,
+                    "detail_url_missing",
+                    f"No detail URL found for the '{methodology['title']}' row on the ACR index.",
+                    "Open the source page manually and confirm the row still links to a per-methodology detail page.",
+                )
+            )
+
+        confidence = "high" if document_url and methodology["version"] else "medium"
+        candidate = make_candidate(
+            profile,
+            "",
+            methodology["title"],
+            "approved_methodology",
+            methodology["sector"],
+            methodology["version"],
+            "Approved",
+            response.url,
+            document_url,
+            "acr_index_table_parse",
+            confidence,
+            notes,
+        )
+        candidate["candidate_type"] = "methodunit_candidate"
+        candidate["classification_reason"] = "American Carbon Registry approved methodology index row."
+        candidates.append(candidate)
+        metrics["acr_records_found"] += 1
+
+    return dedupe_candidates(candidates), errors, metrics
+
+
 def first_url_from_text(value: str) -> str:
     match = re.search(r"https?://[^\s,\"']+", str(value or ""))
     return clean_url(match.group(0)) if match else ""
