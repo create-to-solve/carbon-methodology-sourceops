@@ -28,6 +28,16 @@ The current app is framed as an ecosystem intelligence platform first, with Sour
 6. **Exports** - review-ready CSV downloads and timestamped output saves.
 7. **Strategy** - connector priorities, AI-assisted scaling roadmap, future task schema, and guardrails.
 
+## Source Intelligence Inputs
+
+The Strategy page also reads research-derived source intelligence from `data/source_intelligence/`:
+
+- `connector_source_matrix_synthesized.csv` powers the Connector Roadmap table and roadmap metrics.
+- `connector_source_matrix_synthesized.json` provides metadata such as the matrix generation timestamp.
+- `source_verification_plan.csv` lists URLs and assumptions to verify before coding new connectors.
+
+This supports a verification-before-implementation workflow: research identifies where methodology information appears to live, analysts verify the source behavior, and only then should a connector be implemented.
+
 ## Previous Prototype Page Framing
 
 1. **Source Landscape** — the source universe: total programmes, source archetypes, and the filterable source registry.

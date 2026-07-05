@@ -1,4 +1,5 @@
 import re
+import json
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -9,6 +10,7 @@ import streamlit as st
 
 DATA_DIR = Path(__file__).parent / "data"
 OUTPUTS_DIR = Path(__file__).parent / "outputs"
+SOURCE_INTELLIGENCE_DIR = DATA_DIR / "source_intelligence"
 
 
 FILES = {
@@ -19,6 +21,9 @@ FILES = {
     "next_actions": "next_actions_fixed.csv",
 }
 SOURCE_RESOLUTION_AUDIT_FILE = "source_resolution_audit_mid_activity.csv"
+CONNECTOR_SOURCE_MATRIX_FILE = "connector_source_matrix_synthesized.csv"
+CONNECTOR_SOURCE_MATRIX_JSON_FILE = "connector_source_matrix_synthesized.json"
+SOURCE_VERIFICATION_PLAN_FILE = "source_verification_plan.csv"
 
 
 CANDIDATE_SCHEMA = [
@@ -251,6 +256,39 @@ def load_source_resolution_audit() -> tuple[pd.DataFrame, list[str]]:
     return audit, warnings
 
 
+def load_source_intelligence() -> tuple[dict[str, pd.DataFrame | dict], list[str]]:
+    warnings = []
+    loaded: dict[str, pd.DataFrame | dict] = {
+        "connector_source_matrix": pd.DataFrame(),
+        "source_verification_plan": pd.DataFrame(),
+        "connector_source_matrix_metadata": {},
+    }
+
+    for key, file_name in [
+        ("connector_source_matrix", CONNECTOR_SOURCE_MATRIX_FILE),
+        ("source_verification_plan", SOURCE_VERIFICATION_PLAN_FILE),
+    ]:
+        path = SOURCE_INTELLIGENCE_DIR / file_name
+        if not path.exists():
+            warnings.append(f"Optional source-intelligence file not found: {path}")
+            continue
+        try:
+            loaded[key] = normalize_columns(pd.read_csv(path, dtype=str).fillna(""))
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Could not read source-intelligence CSV {path}: {exc}")
+
+    json_path = SOURCE_INTELLIGENCE_DIR / CONNECTOR_SOURCE_MATRIX_JSON_FILE
+    if not json_path.exists():
+        warnings.append(f"Optional source-intelligence metadata file not found: {json_path}")
+    else:
+        try:
+            loaded["connector_source_matrix_metadata"] = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Could not read source-intelligence metadata JSON {json_path}: {exc}")
+
+    return loaded, warnings
+
+
 @st.cache_data(show_spinner=False)
 def as_csv_download(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
@@ -270,6 +308,9 @@ def load_data() -> dict[str, pd.DataFrame]:
     audit, audit_warnings = load_source_resolution_audit()
     data["source_resolution_audit"] = audit
     data["source_resolution_audit_warnings"] = audit_warnings
+    source_intelligence, source_intelligence_warnings = load_source_intelligence()
+    data.update(source_intelligence)
+    data["source_intelligence_warnings"] = source_intelligence_warnings
     return data
 
 
@@ -377,6 +418,29 @@ def pretty_label(column: str) -> str:
         "recommended_ingestion_mode": "Recommended Ingestion Mode",
         "evidence_url": "Evidence URL",
         "resolved_at": "Resolved At",
+        "programme_name": "Programme",
+        "recommended_priority": "Recommended Priority",
+        "priority_stage": "Priority Stage",
+        "recommended_order": "Recommended Order",
+        "recommended_connector": "Recommended Connector",
+        "source_archetype": "Source Archetype",
+        "records_expected": "Records Expected",
+        "expected_records": "Expected Records",
+        "fields_visible": "Fields Visible",
+        "fields_available": "Fields Available",
+        "extractor_type": "Extractor Type",
+        "implementation_difficulty": "Implementation Difficulty",
+        "known_disagreement": "Known Disagreement",
+        "disagreement_level": "Disagreement Level",
+        "verification_needed": "Verification Needed",
+        "document_library_url": "Document Library URL",
+        "url_to_verify": "URL to Verify",
+        "secondary_url_to_verify": "Secondary URL to Verify",
+        "verification_priority": "Verification Priority",
+        "what_to_check": "What to Check",
+        "expected_result_from_reports": "Expected Result From Reports",
+        "disagreement_to_resolve": "Disagreement to Resolve",
+        "recommended_connector_if_verified": "Recommended Connector if Verified",
     }
     return labels.get(column, column.replace("_", " ").title())
 

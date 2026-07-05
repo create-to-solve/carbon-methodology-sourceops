@@ -1,3 +1,5 @@
+import re
+
 import pandas as pd
 import streamlit as st
 
@@ -99,7 +101,7 @@ def require_rows(df: pd.DataFrame, dataset_name: str) -> bool:
 def dataframe_config(df: pd.DataFrame) -> dict:
     config = {}
     for column in df.columns:
-        if column.endswith("_url") or column in {"official_website", "evidence_urls"}:
+        if column.endswith("_url") or "url" in column or column in {"official_website", "evidence_urls"}:
             label = "Current Source URL" if column == "current_source_url" else pretty_label(column)
             config[column] = st.column_config.LinkColumn(label, display_text=None, width="large")
         else:
@@ -326,6 +328,154 @@ def connector_priority_rows(data: dict[str, pd.DataFrame], plan: pd.DataFrame) -
     for index, row in enumerate(priorities, start=1):
         row["Rank"] = index
     return pd.DataFrame(priorities[:5])
+
+
+def source_intelligence_warnings(data: dict[str, pd.DataFrame]) -> None:
+    for warning in data.get("source_intelligence_warnings", []):
+        st.warning(warning)
+
+
+def text_contains_any(series: pd.Series, terms: list[str]) -> pd.Series:
+    if series.empty:
+        return pd.Series(dtype=bool)
+    pattern = "|".join(re.escape(term) for term in terms)
+    return series.astype(str).str.contains(pattern, case=False, regex=True, na=False)
+
+
+def combined_text(df: pd.DataFrame, columns: list[str]) -> pd.Series:
+    if df.empty:
+        return pd.Series(dtype=str)
+    available = [column for column in columns if column in df.columns]
+    if not available:
+        return pd.Series("", index=df.index)
+    return df[available].astype(str).agg(" ".join, axis=1)
+
+
+def connector_matrix_view(matrix: pd.DataFrame) -> pd.DataFrame:
+    if matrix.empty:
+        return matrix.copy()
+    view = matrix.copy()
+    if "recommended_priority" not in view.columns:
+        view["recommended_priority"] = view.get("priority_stage", "")
+    if "recommended_connector" not in view.columns:
+        view["recommended_connector"] = view.get("extractor_type", "")
+    if "expected_records" not in view.columns:
+        view["expected_records"] = view.get("records_expected", view.get("approximate_methodology_count", ""))
+    if "fields_available" not in view.columns:
+        view["fields_available"] = view.get("fields_visible", "")
+    if "disagreement_level" not in view.columns:
+        view["disagreement_level"] = view.get("known_disagreement", "")
+    if "verification_needed" not in view.columns:
+        verification_text = combined_text(view, ["next_action", "known_disagreement", "implementation_note"])
+        view["verification_needed"] = text_contains_any(verification_text, ["verify", "verification", "fetch", "check"]).map({True: "Yes", False: "No"})
+    if "implementation_difficulty" not in view.columns:
+        difficulty = pd.Series("Low", index=view.index)
+        js_text = combined_text(view, ["js_required", "source_archetype", "extractor_type"])
+        pdf_text = combined_text(view, ["pdf_strategy", "source_archetype"])
+        difficulty.loc[text_contains_any(pdf_text, ["pdf"])] = "Medium"
+        difficulty.loc[text_contains_any(js_text, ["yes", "js", "playwright", "browser"])] = "High"
+        view["implementation_difficulty"] = difficulty
+    return view
+
+
+def connector_roadmap_metrics(matrix: pd.DataFrame) -> list[tuple[str, int]]:
+    if matrix.empty:
+        return [
+            ("Total researched sources", 0),
+            ("Implement now", 0),
+            ("Needs verification", 0),
+            ("Requires PDF parsing", 0),
+            ("Requires JS / Playwright", 0),
+            ("Disputed / contradictory", 0),
+        ]
+    view = connector_matrix_view(matrix)
+    priority_text = combined_text(view, ["recommended_priority", "priority_stage", "next_action"])
+    implement_now = text_contains_any(priority_text, ["stage 1", "implement now", "implement or run", "high-priority"])
+    verification_needed = view.get("verification_needed", pd.Series("", index=view.index)).astype(str).str.lower().isin(["yes", "true", "1"])
+    pdf_text = combined_text(view, ["pdf_strategy", "source_archetype", "extractor_type"])
+    js_text = combined_text(view, ["js_required", "source_archetype", "extractor_type", "recommended_connector"])
+    disagreement = view.get("disagreement_level", pd.Series("", index=view.index)).astype(str)
+    disputed = disagreement.str.contains("high|medium|contradict|disput|differ", case=False, regex=True, na=False)
+    return [
+        ("Total researched sources", len(view)),
+        ("Implement now", int(implement_now.sum())),
+        ("Needs verification", int(verification_needed.sum())),
+        ("Requires PDF parsing", int(text_contains_any(pdf_text, ["pdf"]).sum())),
+        ("Requires JS / Playwright", int(text_contains_any(js_text, ["yes", "js", "playwright", "browser"]).sum())),
+        ("Disputed / contradictory", int(disputed.sum())),
+    ]
+
+
+def connector_roadmap_page(data: dict[str, pd.DataFrame]) -> None:
+    st.subheader("Connector Roadmap")
+    st.info(
+        "This section converts the research audits into an implementation roadmap. "
+        "It does not mean the sources have already been extracted. It identifies where methodology information appears to live "
+        "and what connector pattern should be tested."
+    )
+    source_intelligence_warnings(data)
+
+    matrix = data.get("connector_source_matrix", pd.DataFrame())
+    verification_plan = data.get("source_verification_plan", pd.DataFrame())
+    metadata = data.get("connector_source_matrix_metadata", {})
+    if isinstance(metadata, dict) and metadata.get("generated_at"):
+        st.caption(f"Research matrix generated at: {metadata.get('generated_at')}")
+
+    if matrix.empty:
+        st.info("No connector source matrix is loaded yet.")
+    else:
+        metric_row(connector_roadmap_metrics(matrix))
+        view = connector_matrix_view(matrix)
+        filter_columns = [
+            column
+            for column in ["source_archetype", "recommended_priority", "extractor_type", "verification_needed", "disagreement_level"]
+            if column in view.columns
+        ]
+        filtered = inline_filters(view, filter_columns, "connector_roadmap")
+        display_columns = [
+            "programme_name",
+            "recommended_priority",
+            "recommended_connector",
+            "source_archetype",
+            "methodology_source_url",
+            "registry_url",
+            "document_library_url",
+            "expected_records",
+            "fields_available",
+            "extractor_type",
+            "implementation_difficulty",
+            "next_action",
+            "disagreement_level",
+            "verification_needed",
+        ]
+        st.subheader("Prioritized Connector Table")
+        show_dataframe(select_existing(filtered, display_columns), "connector_roadmap", height=520)
+
+    st.subheader("Verification Plan")
+    if verification_plan.empty:
+        st.info("No source verification plan is loaded yet.")
+    else:
+        st.write("URLs and assumptions to verify before coding new connectors.")
+        verification_filters = [
+            column
+            for column in ["verification_priority", "recommended_connector_if_verified", "programme_name"]
+            if column in verification_plan.columns
+        ]
+        filtered_plan = inline_filters(verification_plan, verification_filters, "source_verification_plan")
+        verification_columns = [
+            "programme_name",
+            "url_to_verify",
+            "secondary_url_to_verify",
+            "verification_priority",
+            "what_to_check",
+            "expected_result_from_reports",
+            "disagreement_to_resolve",
+            "recommended_connector_if_verified",
+            "status",
+            "verified_at",
+            "notes",
+        ]
+        show_dataframe(select_existing(filtered_plan, verification_columns), "source_verification_plan", height=420)
 
 
 def render_audit_summary(audit: pd.DataFrame, key_prefix: str) -> None:
@@ -1924,6 +2074,8 @@ def ai_assisted_scaling_page(data: dict[str, pd.DataFrame]) -> None:
     if not profiles.empty:
         st.subheader("Connector Priorities")
         st.dataframe(connector_priority_rows(data, derive_onboarding_plan(profiles)), hide_index=True, use_container_width=True)
+
+    connector_roadmap_page(data)
 
     st.subheader("AI-Assisted Scaling")
     page_summary("How AI can assist review responsibly — bounded to evidence, not blindly scraping.")
