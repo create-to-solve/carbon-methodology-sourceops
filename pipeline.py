@@ -25,6 +25,29 @@ SOURCE_RESOLUTION_AUDIT_FILE = "source_resolution_audit_mid_activity.csv"
 CONNECTOR_SOURCE_MATRIX_FILE = "connector_source_matrix_synthesized.csv"
 CONNECTOR_SOURCE_MATRIX_JSON_FILE = "connector_source_matrix_synthesized.json"
 SOURCE_VERIFICATION_PLAN_FILE = "source_verification_plan.csv"
+PLAN_VERIFICATION_RESULTS_FILE = "source_verification_results.csv"
+
+PLAN_VERIFICATION_RESULT_SCHEMA = [
+    "programme_name",
+    "url_checked",
+    "url_role",
+    "http_status",
+    "final_url",
+    "content_type",
+    "response_size_bytes",
+    "fetch_ok",
+    "error_message",
+    "total_links",
+    "pdf_links",
+    "likely_detail_links",
+    "methodology_keywords_hit",
+    "codes_detected",
+    "records_detected",
+    "js_likely_required",
+    "verification_status",
+    "notes",
+    "checked_at",
+]
 
 
 CANDIDATE_SCHEMA = [
@@ -147,6 +170,27 @@ CONNECTOR_MANIFEST_SCHEMA = [
     "source_url",
     "next_action",
     "implementation_note",
+]
+PROGRAMME_INTELLIGENCE_SCHEMA = [
+    "programme_name",
+    "official_website",
+    "registry_url",
+    "methodology_source_url",
+    "document_library_url",
+    "source_pattern",
+    "connector_type",
+    "connector_status",
+    "populated_source_status",
+    "extraction_strategy",
+    "recommended_connector",
+    "recommended_priority",
+    "verification_needed",
+    "human_review_required",
+    "confidence",
+    "next_action",
+    "notes",
+    "data_coverage_level",
+    "dossier_source_files",
 ]
 ALLOWED_CANDIDATE_TYPES = [
     "methodunit_candidate",
@@ -355,6 +399,23 @@ def as_csv_download(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 
 
+def load_plan_verification_results() -> pd.DataFrame:
+    """Load the plan-driven verification results file if present.
+
+    Written by ``scripts/verify_source_intelligence.py``. Absent by default; the
+    UI treats missing rows as "no verification has been run yet."
+    """
+    path = OUTPUTS_DIR / PLAN_VERIFICATION_RESULTS_FILE
+    if not path.exists():
+        return pd.DataFrame(columns=PLAN_VERIFICATION_RESULT_SCHEMA)
+    try:
+        df = normalize_columns(pd.read_csv(path, dtype=str).fillna(""))
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Could not read {path}: {exc}")
+        return pd.DataFrame(columns=PLAN_VERIFICATION_RESULT_SCHEMA)
+    return ensure_columns(df, PLAN_VERIFICATION_RESULT_SCHEMA)
+
+
 def load_data() -> dict[str, pd.DataFrame]:
     data = {}
     for key, file_name in FILES.items():
@@ -372,6 +433,7 @@ def load_data() -> dict[str, pd.DataFrame]:
     source_intelligence, source_intelligence_warnings = load_source_intelligence()
     data.update(source_intelligence)
     data["source_intelligence_warnings"] = source_intelligence_warnings
+    data["plan_verification_results"] = load_plan_verification_results()
     return data
 
 
@@ -516,6 +578,11 @@ def pretty_label(column: str) -> str:
         "output_types": "Output Types",
         "capabilities": "Capabilities",
         "implementation_note": "Implementation Note",
+        "methodology_source_url": "Methodology Source URL",
+        "source_pattern": "Source Pattern",
+        "recommended_priority": "Recommended Priority",
+        "data_coverage_level": "Data Coverage Level",
+        "dossier_source_files": "Dossier Source Files",
     }
     return labels.get(column, column.replace("_", " ").title())
 
@@ -995,6 +1062,240 @@ def save_review_decisions(decisions: pd.DataFrame) -> Path | None:
 def connector_id(value: str) -> str:
     cleaned = re.sub(r"[^a-z0-9]+", "_", normalize_text(value).lower()).strip("_")
     return cleaned or "unknown_source"
+
+
+def programme_key(value: str) -> str:
+    text = normalize_text(value).lower()
+    text = re.sub(r"[()]", " ", text)
+    text = text.replace("&", "and")
+    text = re.sub(r"\bprogramme\b", "program", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    text = re.sub(r"\b(of|the)\b", " ", text)
+    return normalize_text(text)
+
+
+def row_lookup(df: pd.DataFrame, column: str) -> dict[str, pd.Series]:
+    if df.empty or column not in df.columns:
+        return {}
+    lookup = {}
+    for _, row in df.iterrows():
+        key = programme_key(row.get(column, ""))
+        if key and key not in lookup:
+            lookup[key] = row
+    return lookup
+
+
+def matching_row(lookup: dict[str, pd.Series], programme: str) -> pd.Series | None:
+    key = programme_key(programme)
+    if key in lookup:
+        return lookup[key]
+    for candidate_key, row in lookup.items():
+        if key and (key in candidate_key or candidate_key in key):
+            return row
+    return None
+
+
+def connector_strategy_for_programme(strategy: pd.DataFrame, programme: str) -> pd.Series | None:
+    if strategy.empty or "program_name" not in strategy.columns:
+        return None
+    target = programme_key(programme)
+    for _, row in strategy.iterrows():
+        raw = str(row.get("program_name", ""))
+        candidates = []
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                candidates = [str(item) for item in parsed]
+        except Exception:  # noqa: BLE001 - list-like CSV cells are best-effort metadata.
+            candidates = [raw]
+        candidate_keys = [programme_key(candidate) for candidate in candidates]
+        if target in candidate_keys or any(target in candidate or candidate in target for candidate in candidate_keys if candidate):
+            return row
+    return None
+
+
+def nonempty_join(values: list[str], separator: str = " | ") -> str:
+    cleaned = []
+    seen = set()
+    for value in values:
+        text = normalize_text(value)
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            cleaned.append(text)
+    return separator.join(cleaned)
+
+
+def value_from_rows(rows: list[pd.Series | None], fields: list[str]) -> str:
+    for row in rows:
+        if row is None:
+            continue
+        for field in fields:
+            value = normalize_text(row.get(field, ""))
+            if value:
+                return value
+    return ""
+
+
+def source_files_from_rows(row_map: dict[str, pd.Series | None], extracted: bool) -> str:
+    file_map = {
+        "resolution_session": "source_resolution_results.csv",
+        "extracted": "extracted_source_links_full.csv",
+        "matrix": "connector_source_matrix_synthesized.csv",
+        "verification": "source_verification_plan.csv",
+        "profile": "source_profiles_final_fixed.csv",
+        "strategy": "connector_strategy_fixed.csv",
+        "wave": "extraction_waves_fixed.csv",
+        "action": "next_actions_fixed.csv",
+        "qa": "qa_flags_fixed.csv",
+        "audit": "source_resolution_audit_mid_activity.csv",
+    }
+    sources = []
+    if extracted:
+        sources.append(file_map["extracted"])
+    for key, row in row_map.items():
+        if row is not None and key in file_map:
+            sources.append(file_map[key])
+    return nonempty_join(sources, ", ")
+
+
+def coverage_level(row_map: dict[str, pd.Series | None], extracted: bool) -> str:
+    if extracted:
+        return "extracted"
+    if row_map.get("matrix") is not None:
+        return "researched_connector"
+    if row_map.get("resolution_session") is not None or row_map.get("audit") is not None:
+        return "source_resolution_needed"
+    if row_map.get("profile") is not None:
+        return "baseline_profile"
+    if any(row_map.get(key) is not None for key in ["strategy", "wave", "action", "qa", "verification"]):
+        return "minimal_inventory_only"
+    return "unknown"
+
+
+def build_programme_intelligence(data: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    profiles = data.get("source_profiles", pd.DataFrame())
+    matrix = data.get("connector_source_matrix", pd.DataFrame())
+    verification = data.get("source_verification_plan", pd.DataFrame())
+    strategy = data.get("connector_strategy", pd.DataFrame())
+    waves = data.get("extraction_waves", pd.DataFrame())
+    actions = data.get("next_actions", pd.DataFrame())
+    qa = data.get("qa_flags", pd.DataFrame())
+    audit = data.get("source_resolution_audit", pd.DataFrame())
+
+    extracted_links = current_extracted_links()
+    resolution_results = current_source_resolution_results()
+
+    lookups = {
+        "profile": row_lookup(profiles, "program_name"),
+        "matrix": row_lookup(matrix, "programme_name"),
+        "verification": row_lookup(verification, "programme_name"),
+        "wave": row_lookup(waves, "program_name"),
+        "action": row_lookup(actions, "program_name"),
+        "qa": row_lookup(qa, "program_name"),
+        "audit": row_lookup(audit, "programme"),
+        "resolution_session": row_lookup(resolution_results, "programme"),
+        "extracted": row_lookup(extracted_links, "program_name"),
+    }
+
+    names = []
+    for df, column in [
+        (profiles, "program_name"),
+        (matrix, "programme_name"),
+        (verification, "programme_name"),
+        (waves, "program_name"),
+        (actions, "program_name"),
+        (qa, "program_name"),
+        (audit, "programme"),
+        (resolution_results, "programme"),
+        (extracted_links, "program_name"),
+    ]:
+        if not df.empty and column in df.columns:
+            names.extend(value for value in df[column].astype(str).str.strip().unique() if value)
+
+    rows = []
+    seen = set()
+    for programme in names:
+        key = programme_key(programme)
+        if not key or key in seen or any(key in seen_key or seen_key in key for seen_key in seen if seen_key):
+            continue
+        seen.add(key)
+        row_map = {
+            "profile": matching_row(lookups["profile"], programme),
+            "matrix": matching_row(lookups["matrix"], programme),
+            "verification": matching_row(lookups["verification"], programme),
+            "wave": matching_row(lookups["wave"], programme),
+            "action": matching_row(lookups["action"], programme),
+            "qa": matching_row(lookups["qa"], programme),
+            "audit": matching_row(lookups["audit"], programme),
+            "resolution_session": matching_row(lookups["resolution_session"], programme),
+            "extracted": matching_row(lookups["extracted"], programme),
+            "strategy": connector_strategy_for_programme(strategy, programme),
+        }
+        ordered = [
+            row_map["extracted"],
+            row_map["resolution_session"],
+            row_map["matrix"],
+            row_map["verification"],
+            row_map["profile"],
+            row_map["strategy"],
+            row_map["wave"],
+            row_map["action"],
+            row_map["qa"],
+            row_map["audit"],
+        ]
+        extracted = row_map["extracted"] is not None
+        method_source = value_from_rows(ordered, ["source_url", "methodology_source_url", "url_to_verify", "method_source_url", "official_website", "evidence_url", "evidence_urls"])
+        document_url = value_from_rows(ordered, ["document_url", "document_library_url", "secondary_url_to_verify", "evidence_url", "evidence_urls"])
+        strategy_value = value_from_rows(ordered, ["extraction_strategy", "implementation_note", "recommended_ingestion_mode", "extraction_method"])
+        next_action = value_from_rows(ordered, ["next_action", "recommended_next_action", "recommended_catalogue_action", "recommended_resolution", "issue"])
+        notes = nonempty_join(
+            [
+                value_from_rows([row_map["profile"]], ["notes"]),
+                value_from_rows([row_map["matrix"]], ["implementation_note", "known_disagreement"]),
+                value_from_rows([row_map["audit"]], ["notes", "assessment_basis"]),
+                value_from_rows([row_map["qa"]], ["issue"]),
+            ]
+        )
+        verification_needed = "Yes" if row_map["verification"] is not None else ""
+        if row_map["matrix"] is not None:
+            matrix_text = nonempty_join(
+                [
+                    value_from_rows([row_map["matrix"]], ["next_action", "known_disagreement", "implementation_note"]),
+                ]
+            ).lower()
+            if any(term in matrix_text for term in ["verify", "verification", "fetch", "check", "disagreement"]):
+                verification_needed = "Yes"
+        if row_map["audit"] is not None and value_from_rows([row_map["audit"]], ["review_status", "source_access_issue"]):
+            verification_needed = verification_needed or "Yes"
+
+        rows.append(
+            {
+                "programme_name": value_from_rows(ordered, ["program_name", "programme_name", "programme"]) or programme,
+                "official_website": value_from_rows(ordered, ["official_website"]),
+                "registry_url": value_from_rows(ordered, ["registry_url"]),
+                "methodology_source_url": clean_url(method_source),
+                "document_library_url": clean_url(document_url),
+                "source_pattern": value_from_rows(ordered, ["source_archetype", "connector_type", "source_type"]),
+                "connector_type": value_from_rows(ordered, ["extractor_type", "recommended_connector_if_verified", "connector_type", "extraction_method"]),
+                "connector_status": "extracted in current session" if extracted else "",
+                "populated_source_status": value_from_rows(ordered, ["populated_source_status", "source_resolves", "review_status"]),
+                "extraction_strategy": strategy_value,
+                "recommended_connector": value_from_rows(ordered, ["recommended_connector", "recommended_connector_if_verified", "extractor_type", "reusable_connector"]),
+                "recommended_priority": value_from_rows(ordered, ["recommended_priority", "priority_stage", "priority", "automation_priority", "extraction_wave"]),
+                "verification_needed": verification_needed or "No",
+                "human_review_required": value_from_rows(ordered, ["human_review_required", "creates_issue_record"]),
+                "confidence": value_from_rows(ordered, ["confidence", "consensus_confidence"]),
+                "next_action": next_action,
+                "notes": notes,
+                "data_coverage_level": coverage_level(row_map, extracted),
+                "dossier_source_files": source_files_from_rows(row_map, extracted),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=PROGRAMME_INTELLIGENCE_SCHEMA)
+    intelligence = ensure_columns(pd.DataFrame(rows), PROGRAMME_INTELLIGENCE_SCHEMA)
+    return intelligence[PROGRAMME_INTELLIGENCE_SCHEMA].sort_values("programme_name").reset_index(drop=True)
 
 
 def build_connector_manifest(data: dict[str, pd.DataFrame]) -> pd.DataFrame:

@@ -29,6 +29,7 @@ from pipeline import (
     apply_output_safeguards,
     as_csv_download,
     build_connector_manifest,
+    build_programme_intelligence,
     build_source_documents,
     clean_url,
     count_contains,
@@ -759,17 +760,10 @@ def connector_manifest_panel(data: dict[str, pd.DataFrame], key: str = "connecto
 
 
 def programme_name_options(data: dict[str, pd.DataFrame]) -> list[str]:
-    names = []
-    for frame, column in [
-        (data.get("source_profiles", pd.DataFrame()), "program_name"),
-        (data.get("connector_source_matrix", pd.DataFrame()), "programme_name"),
-        (data.get("source_verification_plan", pd.DataFrame()), "programme_name"),
-        (current_extracted_links(), "program_name"),
-        (current_source_resolution_results(), "programme"),
-    ]:
-        if not frame.empty and column in frame.columns:
-            names.extend(value for value in frame[column].astype(str).str.strip().unique() if value)
-    return sorted(set(names))
+    intelligence = build_programme_intelligence(data)
+    if intelligence.empty or "programme_name" not in intelligence.columns:
+        return []
+    return sorted(value for value in intelligence["programme_name"].astype(str).str.strip().unique() if value)
 
 
 def programme_rows(df: pd.DataFrame, selected_programme: str, column: str) -> pd.DataFrame:
@@ -940,7 +934,12 @@ def methodunit_dossier_page(data: dict[str, pd.DataFrame]) -> None:
 def programme_intelligence_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Programme Intelligence")
     page_summary("Understand what is known about one programme: source location, connector approach, verification needs, and loaded evidence.")
+    st.caption(
+        "The platform tracks all programmes at baseline level. Only some have extracted MethodUnits, "
+        "and the latest source-intelligence matrix covers researched next connectors rather than the full universe."
+    )
 
+    programme_intelligence = build_programme_intelligence(data)
     programmes = programme_name_options(data)
     if not programmes:
         st.info("No programme registry or source-intelligence rows are loaded yet.")
@@ -972,6 +971,7 @@ def programme_intelligence_page(data: dict[str, pd.DataFrame]) -> None:
         SOURCE_RESOLUTION_SCHEMA,
     )
 
+    intelligence_rows = programme_rows(programme_intelligence, selected_programme, "programme_name")
     profile_rows = programme_rows(profiles, selected_programme, "program_name")
     matrix_rows = programme_rows(matrix, selected_programme, "programme_name")
     verification_rows = programme_rows(verification_plan, selected_programme, "programme_name")
@@ -980,6 +980,7 @@ def programme_intelligence_page(data: dict[str, pd.DataFrame]) -> None:
     document_rows = programme_rows(source_documents, selected_programme, "program_name")
     resolution_rows = programme_rows(resolution, selected_programme, "programme")
 
+    intelligence_row = intelligence_rows.iloc[0] if not intelligence_rows.empty else pd.Series(dtype=object)
     profile = profile_rows.iloc[0] if not profile_rows.empty else pd.Series(dtype=object)
     matrix_row = matrix_rows.iloc[0] if not matrix_rows.empty else pd.Series(dtype=object)
     manifest_row = manifest_rows.iloc[0] if not manifest_rows.empty else pd.Series(dtype=object)
@@ -987,16 +988,19 @@ def programme_intelligence_page(data: dict[str, pd.DataFrame]) -> None:
     st.subheader("Status Summary")
     summary_rows = pd.DataFrame(
         [
-            {"Signal": "Connector status", "Current state": first_value(manifest_row.get("connector_status", ""), profile.get("populated_source_status", "")) or "Not classified yet"},
-            {"Signal": "Source pattern", "Current state": first_value(matrix_row.get("source_archetype", ""), profile.get("connector_type", ""), profile.get("source_type", "")) or "Unknown"},
-            {"Signal": "Current extraction status", "Current state": first_value(manifest_row.get("run_mode", ""), profile.get("extraction_strategy", "")) or "Not attempted yet"},
-            {"Signal": "Next action", "Current state": first_value(manifest_row.get("next_action", ""), matrix_row.get("next_action", ""), profile.get("notes", "")) or "Review source registry and verification plan."},
+            {"Signal": "Data coverage", "Current state": first_value(intelligence_row.get("data_coverage_level", "")) or "unknown"},
+            {"Signal": "Connector status", "Current state": first_value(intelligence_row.get("connector_status", ""), manifest_row.get("connector_status", ""), intelligence_row.get("populated_source_status", "")) or "No connector implemented yet"},
+            {"Signal": "Source pattern", "Current state": first_value(intelligence_row.get("source_pattern", ""), matrix_row.get("source_archetype", ""), profile.get("connector_type", ""), profile.get("source_type", "")) or "Unknown"},
+            {"Signal": "Current extraction status", "Current state": first_value(intelligence_row.get("extraction_strategy", ""), manifest_row.get("run_mode", "")) or "Not attempted yet"},
+            {"Signal": "Next action", "Current state": first_value(intelligence_row.get("next_action", ""), manifest_row.get("next_action", ""), matrix_row.get("next_action", ""), profile.get("notes", "")) or "Review source registry and verification plan."},
         ]
     )
     st.dataframe(summary_rows, hide_index=True, use_container_width=True)
 
     st.subheader("Where Methodology Information Lives")
     location_summary = first_value(
+        intelligence_row.get("notes", ""),
+        intelligence_row.get("extraction_strategy", ""),
         matrix_row.get("implementation_note", ""),
         profile.get("notes", ""),
         profile.get("extraction_strategy", ""),
@@ -1007,10 +1011,10 @@ def programme_intelligence_page(data: dict[str, pd.DataFrame]) -> None:
     st.subheader("Known Source URLs")
     url_rows = []
     for label, value in [
-        ("Methodology source URL", first_value(matrix_row.get("methodology_source_url", ""), profile.get("method_source_url", ""))),
-        ("Registry URL", first_value(matrix_row.get("registry_url", ""), profile.get("registry_url", ""))),
-        ("Document library URL", first_value(matrix_row.get("document_library_url", ""), profile.get("evidence_urls", ""))),
-        ("Current source URL", first_value(manifest_row.get("source_url", ""), profile.get("method_source_url", ""), profile.get("official_website", ""))),
+        ("Official website", first_value(intelligence_row.get("official_website", ""), profile.get("official_website", ""))),
+        ("Methodology source URL", first_value(intelligence_row.get("methodology_source_url", ""), matrix_row.get("methodology_source_url", ""), profile.get("method_source_url", ""))),
+        ("Registry URL", first_value(intelligence_row.get("registry_url", ""), matrix_row.get("registry_url", ""), profile.get("registry_url", ""))),
+        ("Document library URL", first_value(intelligence_row.get("document_library_url", ""), matrix_row.get("document_library_url", ""), profile.get("evidence_urls", ""))),
     ]:
         if value:
             url_rows.append({"Source": label, "url": value})
@@ -1023,18 +1027,19 @@ def programme_intelligence_page(data: dict[str, pd.DataFrame]) -> None:
     field_text = first_value(matrix_row.get("fields_available", ""), matrix_row.get("fields_visible", ""))
     fields = selected_field_rows(field_text)
     if fields.empty:
-        st.info("No expected field inventory is recorded for this programme yet.")
+        st.info("No expected field inventory is recorded for this programme yet. Use the source pattern and baseline notes to verify fields before connector work.")
     else:
         st.dataframe(fields, hide_index=True, use_container_width=True)
 
     st.subheader("Recommended Connector Approach")
     approach_rows = pd.DataFrame(
         [
-            {"Question": "Extractor type", "Answer": first_value(matrix_row.get("extractor_type", ""), matrix_row.get("recommended_connector", ""), manifest_row.get("run_mode", "")) or "Not specified"},
-            {"Question": "Parsing plan", "Answer": first_value(matrix_row.get("implementation_note", ""), profile.get("extraction_strategy", "")) or "Verify source structure before coding."},
+            {"Question": "Extractor type", "Answer": first_value(intelligence_row.get("recommended_connector", ""), intelligence_row.get("connector_type", ""), matrix_row.get("extractor_type", ""), matrix_row.get("recommended_connector", ""), manifest_row.get("run_mode", "")) or "Not specified"},
+            {"Question": "Parsing plan", "Answer": first_value(intelligence_row.get("extraction_strategy", ""), matrix_row.get("implementation_note", ""), profile.get("extraction_strategy", "")) or "Verify source structure before coding."},
             {"Question": "PDF plan", "Answer": first_value(matrix_row.get("pdf_strategy", "")) or "No PDF parsing plan recorded."},
             {"Question": "Dedupe key", "Answer": first_value(matrix_row.get("dedupe_key", "")) or "Not specified yet."},
-            {"Question": "Confidence logic", "Answer": first_value(matrix_row.get("consensus_confidence", ""), profile.get("confidence", "")) or "Review required."},
+            {"Question": "Confidence logic", "Answer": first_value(intelligence_row.get("confidence", ""), matrix_row.get("consensus_confidence", ""), profile.get("confidence", "")) or "Review required."},
+            {"Question": "Human review", "Answer": first_value(intelligence_row.get("human_review_required", ""), profile.get("human_review_required", "")) or "Review required before catalogue use."},
         ]
     )
     st.dataframe(approach_rows, hide_index=True, use_container_width=True)
@@ -1061,6 +1066,44 @@ def programme_intelligence_page(data: dict[str, pd.DataFrame]) -> None:
             height=260,
         )
 
+    st.subheader("Verified Source Checks")
+    verification_results = data.get("plan_verification_results", pd.DataFrame())
+    programme_verification = programme_rows(verification_results, selected_programme, "programme_name")
+    if programme_verification.empty:
+        st.info(
+            "No verification runner results recorded for this programme yet. "
+            "Run `python scripts/verify_source_intelligence.py` to populate."
+        )
+    else:
+        latest = programme_verification.sort_values("checked_at", ascending=False).iloc[0]
+        summary_cols = [
+            {"Signal": "Last checked", "Value": latest.get("checked_at", "")},
+            {"Signal": "Verification status", "Value": latest.get("verification_status", "")},
+            {"Signal": "Records detected", "Value": latest.get("records_detected", "")},
+            {"Signal": "PDF links detected", "Value": latest.get("pdf_links", "")},
+            {"Signal": "JS likely required", "Value": latest.get("js_likely_required", "")},
+            {"Signal": "Notes", "Value": latest.get("notes", "")},
+        ]
+        st.dataframe(pd.DataFrame(summary_cols), hide_index=True, use_container_width=True)
+        show_dataframe(
+            select_existing(
+                programme_verification,
+                [
+                    "url_checked",
+                    "url_role",
+                    "http_status",
+                    "final_url",
+                    "content_type",
+                    "records_detected",
+                    "pdf_links",
+                    "verification_status",
+                    "checked_at",
+                ],
+            ),
+            "programme_verification_results",
+            height=200,
+        )
+
     st.subheader("Current Evidence")
     method_rows = link_rows[
         link_rows.get("candidate_type", pd.Series("", index=link_rows.index)).astype(str).eq("methodunit_candidate")
@@ -1073,7 +1116,7 @@ def programme_intelligence_page(data: dict[str, pd.DataFrame]) -> None:
         ]
     )
     if method_rows.empty and document_rows.empty and resolution_rows.empty:
-        st.info("No session or exported evidence is loaded for this programme yet. Run Source Explorer or load/export CSVs from Review Desk.")
+        st.info("No candidate MethodUnits loaded yet. This programme is currently represented by source intelligence / baseline profile data.")
     else:
         if not method_rows.empty:
             with st.expander("Candidate records", expanded=True):
@@ -1086,6 +1129,11 @@ def programme_intelligence_page(data: dict[str, pd.DataFrame]) -> None:
                 show_dataframe(select_existing(resolution_rows, SOURCE_RESOLUTION_SCHEMA), "programme_resolution_context", height=180)
 
     with st.expander("Advanced details", expanded=False):
+        st.subheader("Dossier Sources")
+        source_files = first_value(intelligence_row.get("dossier_source_files", ""))
+        st.info(f"Dossier built from: {source_files or 'No source files contributed rows for this selection.'}")
+        st.subheader("Unified Programme Intelligence Row")
+        show_dataframe(intelligence_rows, "programme_unified_intelligence", height=220)
         st.subheader("Raw Source Registry Rows")
         show_dataframe(profile_rows, "programme_raw_source_profile", height=220)
         st.subheader("Raw Connector Matrix Rows")
@@ -2069,6 +2117,10 @@ def export_page(data: dict[str, pd.DataFrame]) -> None:
 def overview_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Carbon Methodology Intelligence Platform")
     st.subheader("Map where methodology information lives, extract what can be extracted, and preserve evidence for human review.")
+    st.caption(
+        "The app tracks the full programme inventory at baseline level. Only some programmes have extracted MethodUnits, "
+        "and the source-intelligence matrix represents researched next connectors rather than the full universe."
+    )
 
     profiles = data.get("source_profiles", pd.DataFrame())
     if not require_rows(profiles, "source registry"):
@@ -2667,6 +2719,40 @@ def connector_roadmap_platform_page(data: dict[str, pd.DataFrame]) -> None:
                     re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_"),
                     height=240,
                 )
+
+    st.subheader("Verified Source Checks")
+    verification_results = data.get("plan_verification_results", pd.DataFrame())
+    if verification_results.empty:
+        st.info(
+            "No verification results loaded. Run `python scripts/verify_source_intelligence.py` "
+            "to fetch the plan and matrix URLs and populate `outputs/source_verification_results.csv`."
+        )
+    else:
+        status_counts = (
+            verification_results["verification_status"].fillna("").replace("", "unknown").value_counts()
+        )
+        st.dataframe(
+            pd.DataFrame({"verification_status": status_counts.index, "count": status_counts.values}),
+            hide_index=True,
+            use_container_width=True,
+        )
+        show_dataframe(
+            select_existing(
+                verification_results,
+                [
+                    "programme_name",
+                    "url_role",
+                    "verification_status",
+                    "records_detected",
+                    "pdf_links",
+                    "js_likely_required",
+                    "http_status",
+                    "checked_at",
+                ],
+            ),
+            "roadmap_verification_results",
+            height=280,
+        )
 
     with st.expander("Advanced details", expanded=False):
         connector_roadmap_page(data)
