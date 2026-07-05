@@ -206,6 +206,7 @@ SUPPORTED_EXTRACTORS = [
     "City Forest Credits",
     "Climate Forward",
     "American Carbon Registry / ACR",
+    "Social Carbon",
 ]
 
 LIKELY_LINK_TERMS = (
@@ -1573,6 +1574,7 @@ def run_candidate_extractors(
         extract_cfc_candidates,
         extract_climate_forward_candidates,
         extract_acr_candidates,
+        extract_social_carbon_candidates,
     )
 
     extractor_map = {
@@ -1582,6 +1584,7 @@ def run_candidate_extractors(
         "City Forest Credits": extract_cfc_candidates,
         "Climate Forward": extract_climate_forward_candidates,
         "American Carbon Registry / ACR": extract_acr_candidates,
+        "Social Carbon": extract_social_carbon_candidates,
     }
     all_candidates = []
     errors = []
@@ -1609,6 +1612,14 @@ def run_candidate_extractors(
         "acr_primary_pdf_missing": 0,
         "acr_supporting_documents": 0,
         "acr_historical_documents": 0,
+        "sc_records_found": 0,
+        "sc_inactive_records": 0,
+        "sc_detail_pages_fetched": 0,
+        "sc_detail_pages_failed": 0,
+        "sc_primary_pdf_attached": 0,
+        "sc_primary_pdf_missing": 0,
+        "sc_supporting_documents": 0,
+        "sc_index_codes_seen": 0,
     }
     for extractor_name in selected_extractors:
         extractor = extractor_map.get(extractor_name)

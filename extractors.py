@@ -1508,6 +1508,359 @@ def extract_acr_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = Fa
     return dedupe_candidates(candidates), errors, metrics
 
 
+SOCIAL_CARBON_CANONICAL_SOURCE_URL = "https://www.socialcarbon.org/methodologies"
+SOCIAL_CARBON_CODE_RE = re.compile(r"\bSCM\d{4}\b")
+SOCIAL_CARBON_TITLE_RE = re.compile(r"^\s*(SCM\d{4})\s*[:\-]\s*(.+?)\s*$", re.IGNORECASE)
+SOCIAL_CARBON_STATUS_RE = re.compile(
+    r"Status[:\s]+(Live|Active|Inactive|Withdrawn|Sunset)[^A-Za-z0-9]*(?:since\s*)?([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4})?",
+    re.IGNORECASE,
+)
+SOCIAL_CARBON_MODULE_STOP_TERMS = ("description.", "version history.", "modules /")
+SOCIAL_CARBON_DOCUMENT_EXTENSIONS = (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".zip")
+SOCIAL_CARBON_PRIMARY_ANCHOR_TEXTS = ("view methodology",)
+
+
+def social_carbon_source_url(profile: dict) -> str:
+    candidate = profile_source_url(profile)
+    if candidate and "socialcarbon.org" in candidate.lower() and "methodolog" in candidate.lower():
+        return candidate
+    return SOCIAL_CARBON_CANONICAL_SOURCE_URL
+
+
+def social_carbon_is_document_href(href: str) -> bool:
+    href_l = (href or "").split("?", 1)[0].split("#", 1)[0].lower()
+    return href_l.endswith(SOCIAL_CARBON_DOCUMENT_EXTENSIONS)
+
+
+def collect_social_carbon_index_records(soup, index_url: str) -> tuple[list[dict], list[str]]:
+    """Return (records, seen_codes) parsed from the Social Carbon methodologies index.
+
+    Each record has {code, title, detail_url, is_inactive_context}. ``seen_codes``
+    is the ordered set of distinct SCM codes found on the index (used for
+    fail-loud diagnostics if we discover zero codes).
+    """
+    records: list[dict] = []
+    seen_codes: list[str] = []
+    for heading in soup.find_all("h2"):
+        heading_text = normalize_text(heading.get_text(" ", strip=True))
+        match = SOCIAL_CARBON_TITLE_RE.match(heading_text)
+        if not match:
+            continue
+        code = match.group(1).upper()
+        title = normalize_text(match.group(2))
+        if code not in seen_codes:
+            seen_codes.append(code)
+        # Detail URL: the surrounding container carries an anchor to /scmNNNN.
+        detail_url = ""
+        container = heading
+        for _ in range(5):
+            if container.parent is None:
+                break
+            container = container.parent
+            for anchor in container.find_all("a", href=True):
+                href = anchor.get("href", "").strip()
+                if not href:
+                    continue
+                lowered = href.lower().rstrip("/")
+                if lowered.endswith("/" + code.lower()) or lowered.endswith(code.lower()):
+                    detail_url = urljoin(index_url, href)
+                    break
+            if detail_url:
+                break
+        # Inactive-section detection: any ancestor <h3>/<h4>/<section> label mentioning "Inactive".
+        is_inactive = False
+        section = heading.find_previous(["h1", "h2", "h3", "h4"])
+        while section is not None:
+            section_text = normalize_text(section.get_text(" ", strip=True)).lower()
+            if "inactive methodolog" in section_text:
+                is_inactive = True
+                break
+            section = section.find_previous(["h1", "h2", "h3", "h4"])
+        records.append(
+            {
+                "code": code,
+                "title": title,
+                "detail_url": detail_url,
+                "is_inactive_context": is_inactive,
+            }
+        )
+    return records, seen_codes
+
+
+def parse_social_carbon_status(body_text: str, is_inactive_context: bool) -> str:
+    """Return a normalized status string parsed from detail-page body text."""
+    match = SOCIAL_CARBON_STATUS_RE.search(body_text or "")
+    if match:
+        keyword = match.group(1).title()
+        date = match.group(2) or ""
+        return f"{keyword} since {date}".strip() if date else keyword
+    return "Inactive" if is_inactive_context else "Live"
+
+
+def parse_social_carbon_modules(body_text: str) -> str:
+    """Return a compact string listing modules/tools mentioned on the detail page."""
+    if not body_text:
+        return ""
+    lowered = body_text.lower()
+    marker = "modules / key sources"
+    idx = lowered.find(marker)
+    if idx == -1:
+        return ""
+    snippet = body_text[idx + len(marker): idx + len(marker) + 400]
+    for stop in SOCIAL_CARBON_MODULE_STOP_TERMS:
+        cut = snippet.lower().find(stop)
+        if cut != -1:
+            snippet = snippet[:cut]
+    return normalize_text(snippet)[:300]
+
+
+def parse_social_carbon_version_history(soup) -> str:
+    """Return a compact, semicolon-joined list of versions listed under 'Version History.'."""
+    versions: list[str] = []
+    for heading in soup.find_all(["h3", "h4"]):
+        text = normalize_text(heading.get_text(" ", strip=True))
+        if re.match(r"(?i)^version\s+\d", text):
+            if text not in versions:
+                versions.append(text)
+    return "; ".join(versions)
+
+
+def find_social_carbon_primary_pdf(soup, response_url: str) -> str:
+    for anchor in soup.find_all("a", href=True):
+        text = normalize_text(anchor.get_text(" ", strip=True)).lower()
+        href = anchor.get("href", "").strip()
+        if not href or not social_carbon_is_document_href(href):
+            continue
+        if any(marker in text for marker in SOCIAL_CARBON_PRIMARY_ANCHOR_TEXTS):
+            return urljoin(response_url, href)
+    return ""
+
+
+def collect_social_carbon_detail_documents(
+    profile: dict,
+    record: dict,
+    response,
+    metrics: dict,
+) -> tuple[str, str, str, str, list[dict], list[dict]]:
+    """Fetch a detail page and return (primary_url, status, modules, version_history, supporting, errors)."""
+    soup = BeautifulSoup(response.text, "html.parser")
+    body_text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+    primary_url = find_social_carbon_primary_pdf(soup, response.url)
+    status = parse_social_carbon_status(body_text, record["is_inactive_context"])
+    modules = parse_social_carbon_modules(body_text)
+    version_history = parse_social_carbon_version_history(soup)
+
+    supporting: list[dict] = []
+    errors: list[dict] = []
+    seen_urls: set[str] = set()
+    if primary_url:
+        seen_urls.add(primary_url.lower())
+
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href", "").strip()
+        if not href or not social_carbon_is_document_href(href):
+            continue
+        absolute = urljoin(response.url, href)
+        key = absolute.lower()
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        text = normalize_text(anchor.get_text(" ", strip=True)) or absolute
+        section_heading = anchor.find_previous(["h4", "h3", "h2"])
+        section_label = normalize_text(section_heading.get_text(" ", strip=True)) if section_heading else ""
+        if re.match(r"(?i)^version\s+\d", section_label):
+            evidence_stage = "historical_version" if section_label.lower() not in version_history.lower().split("; ")[-1:] else "current_version_supplement"
+        elif "public comments" in text.lower():
+            evidence_stage = "public_comments"
+        elif any(term in text.lower() for term in ("feasibility", "vvb", "template", "checklist", "tool")):
+            evidence_stage = "tool_or_template"
+        elif "board decision" in text.lower() or "sunset" in text.lower():
+            evidence_stage = "programme_decision"
+        else:
+            evidence_stage = "supporting_document"
+
+        candidate = make_candidate(
+            profile,
+            record["code"],
+            text,
+            "supporting_document",
+            "",
+            "",
+            "",
+            record["detail_url"] or response.url,
+            absolute,
+            "social_carbon_detail_document",
+            "medium",
+            f"Social Carbon detail-page document for {record['code']} '{record['title']}' "
+            f"(section: {section_label or 'unlabelled'}); body not parsed.",
+        )
+        candidate["candidate_type"] = "supporting_document"
+        candidate["classification_reason"] = f"Social Carbon detail-page document ({evidence_stage})."
+        candidate["notes"] = append_note(candidate["notes"], f"evidence_stage: {evidence_stage}")
+        supporting.append(candidate)
+        metrics["sc_supporting_documents"] += 1
+
+    if not primary_url:
+        errors.append(
+            make_extraction_error(
+                profile.get("program_name", "Social Carbon"),
+                record.get("detail_url") or response.url,
+                "document_link_missing",
+                f"No 'View Methodology' anchor was found on the detail page for '{record['code']}'.",
+                "Open the detail page and confirm which anchor represents the current methodology PDF.",
+            )
+        )
+        metrics["sc_primary_pdf_missing"] += 1
+
+    return primary_url, status, modules, version_history, supporting, errors
+
+
+def extract_social_carbon_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = False) -> tuple[list[dict], list[dict], dict[str, int]]:
+    """Extract methodology records from the Social Carbon public methodologies index.
+
+    The index page is a Squarespace-style card layout (no <table>). Each card
+    exposes a ``SCM####:`` heading, a description, and a ``/scm####`` detail
+    link; inactive methodologies sit under an ``Inactive Methodologies``
+    section. Detail pages follow a consistent layout with a top ``View
+    Methodology`` anchor for the current PDF, a ``Version History.`` block
+    with per-version H4s and PDFs, and a ``Modules / Key Sources`` block.
+    Sector, modules and version history are not first-class ``CANDIDATE_SCHEMA``
+    columns; the extractor surfaces them via labelled ``notes`` entries.
+    Historical PDFs and public-comment PDFs are captured as
+    ``supporting_document`` candidates and never attached as the primary
+    document.
+    """
+    profile = get_program_profile(profiles, ["Social Carbon"])
+    metrics = {
+        "sc_records_found": 0,
+        "sc_inactive_records": 0,
+        "sc_detail_pages_fetched": 0,
+        "sc_detail_pages_failed": 0,
+        "sc_primary_pdf_attached": 0,
+        "sc_primary_pdf_missing": 0,
+        "sc_supporting_documents": 0,
+        "sc_index_codes_seen": 0,
+    }
+    errors: list[dict] = []
+    source_url = social_carbon_source_url(profile)
+    response, error = fetch_public_source(source_url, "Social Carbon", allow_insecure_ssl)
+    if error:
+        errors.append(error)
+        return [], errors, metrics
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    index_records, seen_codes = collect_social_carbon_index_records(soup, response.url)
+    metrics["sc_index_codes_seen"] = len(seen_codes)
+    if not index_records:
+        errors.append(
+            make_extraction_error(
+                "Social Carbon",
+                response.url,
+                "page_structure_changed",
+                "Social Carbon methodologies index no longer exposes 'SCM####:' methodology headings.",
+                "Open the source page manually and update the index selector.",
+            )
+        )
+        return [], errors, metrics
+
+    candidates: list[dict] = []
+    seen_dedupe_keys: set[tuple[str, str, str]] = set()
+    for record in index_records:
+        if not record["code"]:
+            continue
+        key = (
+            record["code"].lower(),
+            record["detail_url"].lower(),
+            "",  # placeholder for document_url in dedupe key; recomputed below.
+        )
+        if key in seen_dedupe_keys:
+            continue
+
+        document_url = ""
+        status_value = "Live"
+        modules = ""
+        version_history = ""
+        notes = (
+            "Extracted from the Social Carbon methodologies index; detail-page "
+            "documents captured but not fully parsed."
+        )
+        if record["detail_url"]:
+            detail_response, detail_error = fetch_public_source(
+                record["detail_url"], "Social Carbon", allow_insecure_ssl
+            )
+            if detail_error:
+                metrics["sc_detail_pages_failed"] += 1
+                errors.append(detail_error)
+                status_value = "Inactive" if record["is_inactive_context"] else "Live"
+                notes += " Detail page fetch failed; no methodology PDF attached."
+            else:
+                metrics["sc_detail_pages_fetched"] += 1
+                (
+                    document_url,
+                    status_value,
+                    modules,
+                    version_history,
+                    supporting,
+                    detail_errors,
+                ) = collect_social_carbon_detail_documents(
+                    profile, record, detail_response, metrics
+                )
+                candidates.extend(supporting)
+                errors.extend(detail_errors)
+                if document_url:
+                    metrics["sc_primary_pdf_attached"] += 1
+        else:
+            errors.append(
+                make_extraction_error(
+                    "Social Carbon",
+                    response.url,
+                    "detail_url_missing",
+                    f"No detail URL found alongside the '{record['code']}' heading on the Social Carbon index.",
+                    "Open the index manually and confirm the SCM row still links to a /scm#### detail page.",
+                )
+            )
+
+        dedupe_key = (
+            record["code"].lower(),
+            record["detail_url"].lower(),
+            document_url.lower(),
+        )
+        if dedupe_key in seen_dedupe_keys:
+            continue
+        seen_dedupe_keys.add(dedupe_key)
+
+        rich_notes = notes
+        rich_notes = append_note(rich_notes, "sector: (not published on Social Carbon detail page)")
+        if modules:
+            rich_notes = append_note(rich_notes, f"modules: {modules}")
+        if version_history:
+            rich_notes = append_note(rich_notes, f"version_history: {version_history}")
+
+        confidence = "high" if document_url and version_history else "medium"
+        candidate = make_candidate(
+            profile,
+            record["code"],
+            record["title"] or f"{record['code']} (title requires review)",
+            "methodology",
+            "",
+            version_history.split("; ")[-1] if version_history else "",
+            status_value,
+            response.url,
+            document_url,
+            "social_carbon_index_scan",
+            confidence,
+            rich_notes,
+        )
+        candidate["candidate_type"] = "methodunit_candidate"
+        candidate["classification_reason"] = "Social Carbon methodology index card ({code}).".format(code=record["code"])
+        candidates.append(candidate)
+        metrics["sc_records_found"] += 1
+        if record["is_inactive_context"] or status_value.lower().startswith("inactive"):
+            metrics["sc_inactive_records"] += 1
+
+    return dedupe_candidates(candidates), errors, metrics
+
+
 def first_url_from_text(value: str) -> str:
     match = re.search(r"https?://[^\s,\"']+", str(value or ""))
     return clean_url(match.group(0)) if match else ""
