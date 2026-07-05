@@ -23,6 +23,7 @@ from pipeline import (
     SOURCE_RESOLUTION_AUDIT_FILE,
     SOURCE_RESOLUTION_AUDIT_SCHEMA,
     SOURCE_RESOLUTION_SCHEMA,
+    SOURCE_RESOLUTION_SOURCES,
     SOURCE_VERIFICATION_SCHEMA,
     SUPPORTED_EXTRACTORS,
     add_record_readiness,
@@ -177,7 +178,7 @@ def platform_metric_values(data: dict[str, pd.DataFrame]) -> dict[str, int]:
         recommended_next = min(len(matrix), 5)
     return {
         "programmes_tracked": len(profiles),
-        "working_partial_connectors": count_value(plan, "onboarding_category", "Working extractor"),
+        "working_partial_connectors": len(SUPPORTED_EXTRACTORS) + len(SOURCE_RESOLUTION_SOURCES),
         "researched_next_sources": len(matrix),
         "recommended_next_builds": recommended_next,
         "loaded_candidates": len(current_methodunit_candidates()),
@@ -945,8 +946,15 @@ def programme_intelligence_page(data: dict[str, pd.DataFrame]) -> None:
         st.info("No programme registry or source-intelligence rows are loaded yet.")
         return
 
-    default_index = programmes.index("American Carbon Registry (ACR)") if "American Carbon Registry (ACR)" in programmes else 0
+    default_index = 0
+    for preferred in ("American Carbon Registry (ACR)", "Climate Forward", "Climate Action Reserve"):
+        if preferred in programmes:
+            default_index = programmes.index(preferred)
+            break
     selected_programme = st.selectbox("Programme", programmes, index=default_index, key="programme_intelligence_select")
+    st.caption(
+        "Try these examples: **American Carbon Registry (ACR)**, **Climate Forward**, **Social Carbon**, **Artisan C-sink**."
+    )
 
     profiles = data.get("source_profiles", pd.DataFrame())
     matrix = connector_matrix_view(data.get("connector_source_matrix", pd.DataFrame()))
@@ -2390,47 +2398,75 @@ def explore_source_page(data: dict[str, pd.DataFrame]) -> None:
     st.write("Pick a source, run exploration, and review what happened.")
 
     with st.expander("Recommended demo path", expanded=False):
-        st.write("- CAR: clean methodology/protocol table.")
-        st.write("- City Forest Credits: document/protocol-family source.")
-        st.write("- Artisan C-sink: no clean methodology page; source-resolution case.")
+        st.write("- **Climate Forward** — simple static table.")
+        st.write("- **American Carbon Registry / ACR** — catalogue + detail pages + PDFs.")
+        st.write("- **Social Carbon** — coded detail pages + version history.")
+        st.write("- **Artisan C-sink** — source-resolution case (no clean methodology page).")
 
-    source_context = {
+    default_source_context = {
         "Climate Action Reserve": {
-            "mode": "clean table extraction",
+            "mode": "clean methodology/protocol table",
             "next_action": "Review the records found from the public protocol table, then export if they look right.",
-            "spinner": "Exploring Climate Action Reserve...",
+        },
+        "International Carbon Registry / ICR": {
+            "mode": "discovery-only (M-ICR codes + detail URLs; titles need manual review)",
+            "next_action": "Review discovery records; expect several to be marked needs_research on the title.",
+        },
+        "Asia Carbon Institute": {
+            "mode": "SSL exception surface (source access issue by default)",
+            "next_action": "Review the source-access error; retry only with insecure SSL for analyst testing if needed.",
         },
         "City Forest Credits": {
             "mode": "document/protocol-family extraction",
             "next_action": "Review document titles, versions, and supporting links before catalogue handoff.",
-            "spinner": "Exploring City Forest Credits...",
+        },
+        "Climate Forward": {
+            "mode": "forecast methodology index + detail-page follow-through",
+            "next_action": "Review the 7 forecast methodologies plus their per-methodology PDFs and program document set.",
+        },
+        "American Carbon Registry / ACR": {
+            "mode": "approved methodology catalogue + detail-page follow-through with evidence stages",
+            "next_action": "Review the 13 approved methodologies; historical PDFs are captured but never attached as primary.",
+        },
+        "Social Carbon": {
+            "mode": "coded card index + detail-page follow-through with version history",
+            "next_action": "Review SCM-coded methodologies; inactive methodologies (e.g. SCM0001) are ingested with status = Inactive.",
         },
         "Artisan C-sink": {
-            "mode": "source resolution",
+            "mode": "source resolution (document-family capture)",
             "next_action": "Review the document-family record and supporting clarification links before catalogue handoff.",
-            "spinner": "Resolving Artisan C-sink source...",
         },
     }
-    source = st.selectbox("Source to explore", list(source_context.keys()), key="explore_source_select")
+
+    explorer_sources = list(SUPPORTED_EXTRACTORS) + list(SOURCE_RESOLUTION_SOURCES)
+    source_context = {
+        source: default_source_context.get(
+            source,
+            {
+                "mode": "source-specific extraction",
+                "next_action": f"Review the records returned for {source} before catalogue handoff.",
+            },
+        )
+        for source in explorer_sources
+    }
+    source = st.selectbox("Source to explore", explorer_sources, key="explore_source_select")
 
     if st.button("Explore source", type="primary", key="explore_source_run"):
         context = source_context[source]
-        with st.spinner(context["spinner"]):
-            if source == "Artisan C-sink":
+        spinner_message = f"Exploring {source}..." if source not in SOURCE_RESOLUTION_SOURCES else f"Resolving {source} source..."
+        with st.spinner(spinner_message):
+            if source in SOURCE_RESOLUTION_SOURCES:
                 resolution_df, candidates_df, errors_df = resolve_artisan_c_sink_source(data.get("source_profiles", pd.DataFrame()))
                 enrichment_metrics = {}
                 st.session_state["source_resolution_results"] = resolution_df
                 st.session_state["source_resolution_candidates"] = candidates_df
                 st.session_state["source_resolution_errors"] = errors_df
-                st.session_state["source_resolution_last_run"] = "Artisan C-sink"
+                st.session_state["source_resolution_last_run"] = source
                 st.session_state["demo_source_last_run"] = ""
             else:
-                extractor = {
-                    "Climate Action Reserve": extract_climate_action_reserve_candidates,
-                    "City Forest Credits": extract_cfc_candidates,
-                }[source]
-                candidates_df, errors_df, enrichment_metrics = normalize_demo_extraction_result(
-                    extractor(data.get("source_profiles", pd.DataFrame()))
+                candidates_df, errors_df, enrichment_metrics = run_candidate_extractors(
+                    [source],
+                    data.get("source_profiles", pd.DataFrame()),
                 )
                 st.session_state["source_resolution_last_run"] = ""
                 st.session_state["demo_source_last_run"] = source

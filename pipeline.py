@@ -209,6 +209,10 @@ SUPPORTED_EXTRACTORS = [
     "Social Carbon",
 ]
 
+SOURCE_RESOLUTION_SOURCES = [
+    "Artisan C-sink",
+]
+
 LIKELY_LINK_TERMS = (
     "methodology",
     "methodologies",
