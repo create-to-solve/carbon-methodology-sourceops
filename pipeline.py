@@ -1,3 +1,4 @@
+import hashlib
 import re
 import json
 from datetime import datetime
@@ -86,6 +87,66 @@ SOURCE_RESOLUTION_AUDIT_SCHEMA = [
     "review_status",
     "notes",
     "last_verified",
+]
+SOURCE_VERIFICATION_SCHEMA = [
+    "checked_at",
+    "program_name",
+    "source_url",
+    "final_url",
+    "check_status",
+    "status_code",
+    "content_type",
+    "response_size_bytes",
+    "page_title",
+    "total_links",
+    "pdf_links",
+    "likely_link_count",
+    "likely_links",
+    "content_hash",
+    "error",
+    "recommended_next_action",
+]
+SOURCE_DOCUMENT_SCHEMA = [
+    "document_id",
+    "program_name",
+    "methodunit_code",
+    "methodunit_name",
+    "candidate_type",
+    "document_title",
+    "document_category",
+    "document_url",
+    "source_url",
+    "extraction_method",
+    "review_status",
+    "evidence_stage",
+    "notes",
+    "extracted_at",
+]
+REVIEW_DECISION_SCHEMA = [
+    "reviewed_at",
+    "program_name",
+    "methodunit_code",
+    "methodunit_name",
+    "candidate_type",
+    "document_url",
+    "source_url",
+    "review_decision",
+    "reviewer_note",
+    "record_readiness",
+    "confidence",
+    "previous_review_status",
+]
+CONNECTOR_MANIFEST_SCHEMA = [
+    "programme_name",
+    "connector_id",
+    "source_archetype",
+    "connector_status",
+    "run_mode",
+    "output_types",
+    "capabilities",
+    "source_url",
+    "next_action",
+    "implementation_note",
 ]
 ALLOWED_CANDIDATE_TYPES = [
     "methodunit_candidate",
@@ -441,6 +502,20 @@ def pretty_label(column: str) -> str:
         "expected_result_from_reports": "Expected Result From Reports",
         "disagreement_to_resolve": "Disagreement to Resolve",
         "recommended_connector_if_verified": "Recommended Connector if Verified",
+        "document_id": "Document ID",
+        "document_title": "Document Title",
+        "document_category": "Document Category",
+        "evidence_stage": "Evidence Stage",
+        "reviewed_at": "Reviewed At",
+        "review_decision": "Review Decision",
+        "reviewer_note": "Reviewer Note",
+        "previous_review_status": "Previous Review Status",
+        "connector_id": "Connector ID",
+        "connector_status": "Connector Status",
+        "run_mode": "Run Mode",
+        "output_types": "Output Types",
+        "capabilities": "Capabilities",
+        "implementation_note": "Implementation Note",
     }
     return labels.get(column, column.replace("_", " ").title())
 
@@ -789,11 +864,209 @@ def current_source_resolution_results() -> pd.DataFrame:
     return st.session_state.get("source_resolution_results", pd.DataFrame(columns=SOURCE_RESOLUTION_SCHEMA)).copy()
 
 
+def normalize_source_verification_results(checks: pd.DataFrame) -> pd.DataFrame:
+    if checks.empty:
+        return pd.DataFrame(columns=SOURCE_VERIFICATION_SCHEMA)
+    normalized = ensure_columns(normalize_columns(checks), SOURCE_VERIFICATION_SCHEMA)
+    status = normalized["check_status"].astype(str).str.upper()
+    normalized["recommended_next_action"] = "Verify source behavior before connector implementation."
+    normalized.loc[status.eq("OK"), "recommended_next_action"] = "Source reached; review likely links and proceed to connector design."
+    normalized.loc[status.eq("DOCUMENT"), "recommended_next_action"] = "Document endpoint reached; capture as document-family evidence before parsing."
+    normalized.loc[status.eq("NO_LIKELY_LINKS"), "recommended_next_action"] = "Source reached but no obvious methodology links found; source resolution may be needed."
+    normalized.loc[status.eq("FAILED"), "recommended_next_action"] = "Access issue; repair URL, retry later, or inspect manually before coding."
+    return select_existing(normalized, SOURCE_VERIFICATION_SCHEMA)
+
+
+def current_source_verification_results() -> pd.DataFrame:
+    verification = st.session_state.get("source_verification_results", pd.DataFrame(columns=SOURCE_VERIFICATION_SCHEMA)).copy()
+    if not verification.empty:
+        return ensure_columns(verification, SOURCE_VERIFICATION_SCHEMA)
+    live_checks = st.session_state.get("live_source_check_results", pd.DataFrame())
+    return normalize_source_verification_results(live_checks)
+
+
 def current_live_source_failures() -> pd.DataFrame:
     checks = st.session_state.get("live_source_check_results", pd.DataFrame())
     if checks.empty or "check_status" not in checks.columns:
         return pd.DataFrame()
     return checks[checks["check_status"].astype(str).str.upper().eq("FAILED")].copy()
+
+
+def stable_document_id(row: pd.Series) -> str:
+    source = "|".join(
+        normalize_text(row.get(column, ""))
+        for column in ["program_name", "candidate_type", "methodunit_code", "methodunit_name", "document_url", "source_url"]
+    )
+    return hashlib.sha1(source.encode("utf-8")).hexdigest()[:16]
+
+
+def document_category(row: pd.Series) -> str:
+    candidate_type = normalize_text(row.get("candidate_type", "")).lower()
+    unit_type = normalize_text(row.get("unit_type", "")).lower()
+    url = clean_url(row.get("document_url") or row.get("source_url")).lower()
+    if candidate_type == "methodunit_candidate" and "document" in unit_type:
+        return "methodology_document_family"
+    if candidate_type == "methodunit_candidate":
+        return "methodology_or_protocol_record"
+    if candidate_type == "supporting_document":
+        if url.endswith(".pdf") or ".pdf" in url:
+            return "supporting_pdf_or_document"
+        return "supporting_evidence_link"
+    if candidate_type == "development_page":
+        return "development_or_consultation_page"
+    if candidate_type == "navigation_link":
+        return "navigation_reference"
+    if candidate_type == "exclude":
+        return "excluded_reference"
+    return candidate_type or "source_link"
+
+
+def evidence_stage(row: pd.Series) -> str:
+    category = document_category(row)
+    if category in {"methodology_or_protocol_record", "methodology_document_family"}:
+        return "candidate_methodology_record"
+    if category in {"supporting_pdf_or_document", "supporting_evidence_link"}:
+        return "supporting_evidence"
+    if category == "development_or_consultation_page":
+        return "methodology_development"
+    return "reference_or_review"
+
+
+def build_source_documents(links: pd.DataFrame) -> pd.DataFrame:
+    if links.empty:
+        return pd.DataFrame(columns=SOURCE_DOCUMENT_SCHEMA)
+    prepared = ensure_columns(apply_output_safeguards(links), CANDIDATE_SCHEMA)
+    rows = []
+    for _, row in prepared.iterrows():
+        document_url = clean_url(row.get("document_url") or row.get("source_url"))
+        source_url = clean_url(row.get("source_url"))
+        if not document_url and not source_url:
+            continue
+        document_row = {
+            "document_id": stable_document_id(row),
+            "program_name": normalize_text(row.get("program_name", "")),
+            "methodunit_code": normalize_text(row.get("methodunit_code", "")),
+            "methodunit_name": normalize_text(row.get("methodunit_name", "")),
+            "candidate_type": normalize_text(row.get("candidate_type", "")),
+            "document_title": normalize_text(row.get("methodunit_name", "")) or document_url or source_url,
+            "document_category": document_category(row),
+            "document_url": document_url,
+            "source_url": source_url,
+            "extraction_method": normalize_text(row.get("extraction_method", "")),
+            "review_status": normalize_text(row.get("review_status", "")),
+            "evidence_stage": evidence_stage(row),
+            "notes": normalize_text(row.get("notes", "")),
+            "extracted_at": normalize_text(row.get("extracted_at", "")),
+        }
+        rows.append(document_row)
+    documents = pd.DataFrame(rows, columns=SOURCE_DOCUMENT_SCHEMA)
+    if documents.empty:
+        return documents
+    return documents.drop_duplicates("document_id").reset_index(drop=True)
+
+
+def current_source_documents() -> pd.DataFrame:
+    return build_source_documents(current_extracted_links())
+
+
+def current_review_decisions() -> pd.DataFrame:
+    session_decisions = st.session_state.get("review_decisions", pd.DataFrame(columns=REVIEW_DECISION_SCHEMA)).copy()
+    if not session_decisions.empty:
+        return ensure_columns(session_decisions, REVIEW_DECISION_SCHEMA)
+    return load_output_csv("review_decisions.csv", REVIEW_DECISION_SCHEMA)
+
+
+def save_review_decisions(decisions: pd.DataFrame) -> Path | None:
+    if decisions.empty:
+        return None
+    OUTPUTS_DIR.mkdir(exist_ok=True)
+    path = OUTPUTS_DIR / "review_decisions.csv"
+    new_rows = ensure_columns(decisions, REVIEW_DECISION_SCHEMA)
+    if path.exists():
+        existing = load_output_csv("review_decisions.csv", REVIEW_DECISION_SCHEMA)
+        combined = pd.concat([existing, new_rows], ignore_index=True)
+    else:
+        combined = new_rows
+    combined.to_csv(path, index=False)
+    st.session_state["review_decisions"] = combined
+    return path
+
+
+def connector_id(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "_", normalize_text(value).lower()).strip("_")
+    return cleaned or "unknown_source"
+
+
+def build_connector_manifest(data: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    profiles = data.get("source_profiles", pd.DataFrame())
+    if profiles.empty:
+        return pd.DataFrame(columns=CONNECTOR_MANIFEST_SCHEMA)
+    plan = derive_onboarding_plan(profiles)
+    matrix = data.get("connector_source_matrix", pd.DataFrame())
+    matrix_lookup = {}
+    if not matrix.empty and "programme_name" in matrix.columns:
+        matrix_copy = normalize_columns(matrix)
+        for _, row in matrix_copy.iterrows():
+            matrix_lookup[normalize_text(row.get("programme_name", "")).lower()] = row
+
+    rows = []
+    for _, row in plan.iterrows():
+        programme = normalize_text(row.get("program_name", ""))
+        key = programme.lower()
+        intelligence = matrix_lookup.get(key)
+        source_url = clean_url(row.get("current_source_url") or row.get("method_source_url") or row.get("official_website"))
+        category = normalize_text(row.get("onboarding_category", ""))
+        status = "planned"
+        run_mode = "source verification first"
+        output_types = "source verification"
+        capabilities = "source classification"
+        implementation_note = normalize_text(row.get("notes", ""))
+        if programme in SUPPORTED_EXTRACTORS:
+            status = "operational / partial"
+            run_mode = "source-specific extraction"
+            output_types = "candidate MethodUnits; supporting links; extraction errors"
+            capabilities = "HTML/source-page fetch; link/table classification; evidence URL capture"
+        elif any(name.lower() in key for name in ["artisan c-sink", "artisan c sink"]):
+            status = "operational / source resolution"
+            run_mode = "source resolution"
+            output_types = "source-resolution result; document-family candidate; supporting links"
+            capabilities = "no-index source classification; document-family capture"
+        elif category == "Ready for extraction":
+            status = "ready for connector design"
+        elif category in {"Needs URL repair", "Needs manual investigation"}:
+            status = "verification needed"
+        elif "browser" in category.lower():
+            status = "future optional JS connector"
+            run_mode = "future browser/API investigation"
+        elif "document" in category.lower():
+            status = "document-family connector candidate"
+
+        if intelligence is not None:
+            source_url = clean_url(
+                intelligence.get("methodology_source_url")
+                or intelligence.get("registry_url")
+                or intelligence.get("document_library_url")
+                or source_url
+            )
+            capabilities = normalize_text(intelligence.get("fields_available") or intelligence.get("fields_visible") or capabilities)
+            implementation_note = normalize_text(intelligence.get("next_action") or implementation_note)
+            output_types = normalize_text(intelligence.get("expected_records") or intelligence.get("records_expected") or output_types)
+
+        rows.append(
+            {
+                "programme_name": programme,
+                "connector_id": connector_id(programme),
+                "source_archetype": normalize_text(row.get("connector_type") or row.get("source_type")),
+                "connector_status": status,
+                "run_mode": run_mode,
+                "output_types": output_types,
+                "capabilities": capabilities,
+                "source_url": source_url,
+                "next_action": normalize_text(row.get("recommended_next_action", "")),
+                "implementation_note": implementation_note,
+            }
+        )
+    return pd.DataFrame(rows, columns=CONNECTOR_MANIFEST_SCHEMA)
 
 
 def load_output_csv(file_name: str, columns: list[str] | None = None) -> pd.DataFrame:
@@ -852,8 +1125,12 @@ def save_timestamped_outputs(data: dict[str, pd.DataFrame]) -> list[Path]:
     outputs = {
         f"methodunit_candidates_review_{timestamp}.csv": current_methodunit_candidates(),
         f"extracted_source_links_full_{timestamp}.csv": current_extracted_links(),
+        f"source_documents_{timestamp}.csv": current_source_documents(),
         f"extraction_errors_{timestamp}.csv": current_extraction_errors(),
         f"source_resolution_results_{timestamp}.csv": current_source_resolution_results(),
+        f"source_verification_results_{timestamp}.csv": current_source_verification_results(),
+        f"review_decisions_{timestamp}.csv": current_review_decisions(),
+        f"connector_manifest_{timestamp}.csv": build_connector_manifest(data),
         f"source_registry_{timestamp}.csv": data.get("source_profiles", pd.DataFrame()),
         f"qa_flags_{timestamp}.csv": data.get("qa_flags", pd.DataFrame()),
     }

@@ -15,15 +15,21 @@ except ImportError:  # pragma: no cover - handled in the Streamlit page.
 
 from pipeline import (
     CANDIDATE_SCHEMA,
+    CONNECTOR_MANIFEST_SCHEMA,
     EXTRACTION_ERROR_SCHEMA,
     FILES,
+    REVIEW_DECISION_SCHEMA,
+    SOURCE_DOCUMENT_SCHEMA,
     SOURCE_RESOLUTION_AUDIT_FILE,
     SOURCE_RESOLUTION_AUDIT_SCHEMA,
     SOURCE_RESOLUTION_SCHEMA,
+    SOURCE_VERIFICATION_SCHEMA,
     SUPPORTED_EXTRACTORS,
     add_record_readiness,
     apply_output_safeguards,
     as_csv_download,
+    build_connector_manifest,
+    build_source_documents,
     clean_url,
     count_contains,
     count_value,
@@ -31,15 +37,20 @@ from pipeline import (
     current_extraction_errors,
     current_live_source_failures,
     current_methodunit_candidates,
+    current_review_decisions,
+    current_source_documents,
     current_source_resolution_results,
+    current_source_verification_results,
     derive_onboarding_plan,
     ensure_columns,
     load_data,
+    normalize_source_verification_results,
     normalize_columns,
     normalize_text,
     pretty_label,
     run_candidate_extractors,
     save_timestamped_outputs,
+    save_review_decisions,
     select_existing,
     session_or_output,
     text_blob,
@@ -155,15 +166,35 @@ def current_session_timestamp() -> str:
     return "Not run this session"
 
 
-def sidebar_workspace_status(data: dict[str, pd.DataFrame]) -> None:
+def platform_metric_values(data: dict[str, pd.DataFrame]) -> dict[str, int]:
     profiles = data.get("source_profiles", pd.DataFrame())
-    qa = data.get("qa_flags", pd.DataFrame())
+    plan = derive_onboarding_plan(profiles) if not profiles.empty else pd.DataFrame()
+    matrix = connector_matrix_view(data.get("connector_source_matrix", pd.DataFrame()))
+    priority_text = combined_text(matrix, ["recommended_priority", "priority_stage", "next_action"]) if not matrix.empty else pd.Series(dtype=str)
+    recommended_next = int(text_contains_any(priority_text, ["stage 1", "implement now", "implement or run", "high-priority"]).sum()) if not priority_text.empty else 0
+    if recommended_next == 0 and not matrix.empty:
+        recommended_next = min(len(matrix), 5)
+    return {
+        "programmes_tracked": len(profiles),
+        "working_partial_connectors": count_value(plan, "onboarding_category", "Working extractor"),
+        "researched_next_sources": len(matrix),
+        "recommended_next_builds": recommended_next,
+        "loaded_candidates": len(current_methodunit_candidates()),
+        "loaded_evidence_links": len(current_extracted_links()),
+    }
+
+
+def sidebar_workspace_status(data: dict[str, pd.DataFrame]) -> None:
+    metrics = platform_metric_values(data)
     st.sidebar.caption("Workspace Status")
-    st.sidebar.metric("Programmes", len(profiles))
-    st.sidebar.metric("Operational connectors", len(SUPPORTED_EXTRACTORS))
-    st.sidebar.metric("Candidate methods", len(current_methodunit_candidates()))
-    st.sidebar.metric("Evidence links", len(current_extracted_links()))
-    st.sidebar.metric("QA rules", len(qa))
+    st.sidebar.markdown("**Global**")
+    st.sidebar.metric("Programmes tracked", metrics["programmes_tracked"])
+    st.sidebar.metric("Working / partial connectors", metrics["working_partial_connectors"])
+    st.sidebar.metric("Researched next sources", metrics["researched_next_sources"])
+    st.sidebar.metric("Recommended next builds", metrics["recommended_next_builds"])
+    st.sidebar.markdown("**Current session**")
+    st.sidebar.metric("Loaded candidates", metrics["loaded_candidates"])
+    st.sidebar.metric("Loaded evidence links", metrics["loaded_evidence_links"])
     st.sidebar.caption(f"Last refresh: {current_session_timestamp()}")
 
 
@@ -701,6 +732,368 @@ def render_result_interpretation(candidates: pd.DataFrame, errors: pd.DataFrame)
     st.dataframe(separated_rows, hide_index=True, use_container_width=True)
 
 
+def connector_manifest_panel(data: dict[str, pd.DataFrame], key: str = "connector_manifest") -> None:
+    manifest = build_connector_manifest(data)
+    st.subheader("Connector Capability Matrix")
+    st.write(
+        "This matrix describes how each programme should be handled operationally. "
+        "It is connector metadata, not evidence that a source has already been extracted."
+    )
+    if manifest.empty:
+        st.info("No connector manifest rows are available because the Source Registry is not loaded.")
+        return
+    metric_row(
+        [
+            ("Manifest rows", len(manifest)),
+            ("Operational / partial", count_contains(manifest, "connector_status", "operational")),
+            ("Verification needed", count_contains(manifest, "connector_status", "verification")),
+            ("Document-family candidates", count_contains(manifest, "connector_status", "document")),
+        ]
+    )
+    filtered = inline_filters(
+        manifest,
+        ["connector_status", "source_archetype", "run_mode"],
+        key,
+    )
+    show_dataframe(select_existing(filtered, CONNECTOR_MANIFEST_SCHEMA), key, height=380)
+
+
+def programme_name_options(data: dict[str, pd.DataFrame]) -> list[str]:
+    names = []
+    for frame, column in [
+        (data.get("source_profiles", pd.DataFrame()), "program_name"),
+        (data.get("connector_source_matrix", pd.DataFrame()), "programme_name"),
+        (data.get("source_verification_plan", pd.DataFrame()), "programme_name"),
+        (current_extracted_links(), "program_name"),
+        (current_source_resolution_results(), "programme"),
+    ]:
+        if not frame.empty and column in frame.columns:
+            names.extend(value for value in frame[column].astype(str).str.strip().unique() if value)
+    return sorted(set(names))
+
+
+def programme_rows(df: pd.DataFrame, selected_programme: str, column: str) -> pd.DataFrame:
+    if df.empty or column not in df.columns:
+        return pd.DataFrame()
+    selected_l = normalize_text(selected_programme).lower()
+    values = df[column].astype(str).str.strip().str.lower()
+    exact = df[values.eq(selected_l)].copy()
+    if not exact.empty:
+        return exact
+    return df[values.str.contains(re.escape(selected_l), na=False)].copy()
+
+
+def first_value(*values: object) -> str:
+    for value in values:
+        text = normalize_text(str(value or ""))
+        if text:
+            return text
+    return ""
+
+
+def selected_field_rows(field_text: str) -> pd.DataFrame:
+    fields = [
+        ("title", "Title"),
+        ("code", "Code"),
+        ("version", "Version"),
+        ("status", "Status"),
+        ("sector", "Sector"),
+        ("pdf", "PDF URL"),
+        ("detail", "Detail URL"),
+    ]
+    text_l = normalize_text(field_text).lower()
+    rows = [{"Field": label, "Available": "Yes"} for token, label in fields if token in text_l]
+    if not rows and text_l:
+        rows = [{"Field": "Reported fields", "Available": field_text}]
+    return pd.DataFrame(rows)
+
+
+def compact_roadmap_table(matrix: pd.DataFrame) -> pd.DataFrame:
+    if matrix.empty:
+        return pd.DataFrame(columns=["Programme", "Priority", "Source pattern", "Connector approach", "Next action"])
+    view = connector_matrix_view(matrix)
+    if "recommended_order" in view.columns:
+        order = pd.to_numeric(view["recommended_order"], errors="coerce")
+        view = view.assign(_order=order).sort_values(["_order", "programme_name"], na_position="last")
+    columns = {
+        "programme_name": "Programme",
+        "recommended_priority": "Priority",
+        "source_archetype": "Source pattern",
+        "recommended_connector": "Connector approach",
+        "next_action": "Next action",
+    }
+    compact = select_existing(view, list(columns.keys())).rename(columns=columns)
+    return compact.head(12)
+
+
+def methodunit_dossier_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("MethodUnit Dossier")
+    page_summary("A compact view of one programme or MethodUnit across records, evidence, issues, and source-resolution context.")
+
+    links, links_source = session_or_output(
+        current_extracted_links(),
+        "extracted_source_links_full.csv",
+        "extracted_source_links_full",
+        CANDIDATE_SCHEMA,
+    )
+    errors, errors_source = session_or_output(
+        current_extraction_errors(),
+        "extraction_errors.csv",
+        "extraction_errors",
+        EXTRACTION_ERROR_SCHEMA,
+    )
+    resolution, resolution_source = session_or_output(
+        current_source_resolution_results(),
+        "source_resolution_results.csv",
+        "source_resolution_results",
+        SOURCE_RESOLUTION_SCHEMA,
+    )
+    documents = build_source_documents(links)
+    manifest = build_connector_manifest(data)
+
+    if links.empty and errors.empty and resolution.empty:
+        st.info("No extracted records or source-resolution outputs are loaded yet.")
+        return
+
+    programme_values = []
+    for frame, column in [(links, "program_name"), (errors, "program_name"), (resolution, "programme")]:
+        if not frame.empty and column in frame.columns:
+            programme_values.extend(
+                value for value in frame[column].astype(str).str.strip().unique() if value
+            )
+    programmes = sorted(set(programme_values))
+    if not programmes:
+        st.info("Loaded outputs do not include programme names to build a dossier.")
+        return
+
+    selected_programme = st.selectbox("Programme", programmes, key="methodunit_dossier_programme")
+    st.caption(
+        f"Dossier sources: extracted links = {links_source}; extraction errors = {errors_source}; "
+        f"source resolution = {resolution_source}."
+    )
+
+    programme_links = links[links.get("program_name", pd.Series("", index=links.index)).astype(str).eq(selected_programme)].copy()
+    programme_documents = documents[documents.get("program_name", pd.Series("", index=documents.index)).astype(str).eq(selected_programme)].copy()
+    programme_errors = errors[errors.get("program_name", pd.Series("", index=errors.index)).astype(str).eq(selected_programme)].copy()
+    programme_resolution = resolution[
+        resolution.get("programme", pd.Series("", index=resolution.index)).astype(str).eq(selected_programme)
+    ].copy()
+    programme_manifest = manifest[
+        manifest.get("programme_name", pd.Series("", index=manifest.index)).astype(str).eq(selected_programme)
+    ].copy()
+    methodunits = programme_links[
+        programme_links.get("candidate_type", pd.Series("", index=programme_links.index)).astype(str).eq("methodunit_candidate")
+    ].copy()
+
+    metric_row(
+        [
+            ("Candidate MethodUnits", len(methodunits)),
+            ("Evidence documents / links", len(programme_documents)),
+            ("Issues logged", len(programme_errors)),
+            ("Source-resolution rows", len(programme_resolution)),
+        ]
+    )
+
+    if not programme_manifest.empty:
+        st.subheader("Connector Context")
+        show_dataframe(select_existing(programme_manifest, CONNECTOR_MANIFEST_SCHEMA), "dossier_connector_context", height=160)
+
+    if methodunits.empty:
+        st.info("No candidate MethodUnit records are loaded for this programme.")
+    else:
+        st.subheader("Candidate MethodUnits")
+        show_dataframe(
+            select_existing(
+                add_record_readiness(methodunits),
+                [
+                    "methodunit_code",
+                    "methodunit_name",
+                    "unit_type",
+                    "status",
+                    "record_readiness",
+                    "confidence",
+                    "review_status",
+                    "source_url",
+                    "document_url",
+                    "notes",
+                ],
+            ),
+            "dossier_methodunits",
+            height=260,
+        )
+
+    st.subheader("Evidence Documents and Links")
+    if programme_documents.empty:
+        st.info("No normalized document/evidence rows are loaded for this programme.")
+    else:
+        show_dataframe(select_existing(programme_documents, SOURCE_DOCUMENT_SCHEMA), "dossier_source_documents", height=320)
+
+    st.subheader("Issues and Resolution Context")
+    if programme_errors.empty and programme_resolution.empty:
+        st.info("No extraction issues or source-resolution context are loaded for this programme.")
+    if not programme_errors.empty:
+        show_dataframe(select_existing(programme_errors, EXTRACTION_ERROR_SCHEMA), "dossier_errors", height=180)
+    if not programme_resolution.empty:
+        show_dataframe(select_existing(programme_resolution, SOURCE_RESOLUTION_SCHEMA), "dossier_source_resolution", height=180)
+
+
+def programme_intelligence_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Programme Intelligence")
+    page_summary("Understand what is known about one programme: source location, connector approach, verification needs, and loaded evidence.")
+
+    programmes = programme_name_options(data)
+    if not programmes:
+        st.info("No programme registry or source-intelligence rows are loaded yet.")
+        return
+
+    default_index = programmes.index("American Carbon Registry (ACR)") if "American Carbon Registry (ACR)" in programmes else 0
+    selected_programme = st.selectbox("Programme", programmes, index=default_index, key="programme_intelligence_select")
+
+    profiles = data.get("source_profiles", pd.DataFrame())
+    matrix = connector_matrix_view(data.get("connector_source_matrix", pd.DataFrame()))
+    verification_plan = data.get("source_verification_plan", pd.DataFrame())
+    manifest = build_connector_manifest(data)
+    links, _links_source = session_or_output(
+        current_extracted_links(),
+        "extracted_source_links_full.csv",
+        "extracted_source_links_full",
+        CANDIDATE_SCHEMA,
+    )
+    source_documents, _documents_source = session_or_output(
+        current_source_documents(),
+        "source_documents.csv",
+        "source_documents",
+        SOURCE_DOCUMENT_SCHEMA,
+    )
+    resolution, _resolution_source = session_or_output(
+        current_source_resolution_results(),
+        "source_resolution_results.csv",
+        "source_resolution_results",
+        SOURCE_RESOLUTION_SCHEMA,
+    )
+
+    profile_rows = programme_rows(profiles, selected_programme, "program_name")
+    matrix_rows = programme_rows(matrix, selected_programme, "programme_name")
+    verification_rows = programme_rows(verification_plan, selected_programme, "programme_name")
+    manifest_rows = programme_rows(manifest, selected_programme, "programme_name")
+    link_rows = programme_rows(links, selected_programme, "program_name")
+    document_rows = programme_rows(source_documents, selected_programme, "program_name")
+    resolution_rows = programme_rows(resolution, selected_programme, "programme")
+
+    profile = profile_rows.iloc[0] if not profile_rows.empty else pd.Series(dtype=object)
+    matrix_row = matrix_rows.iloc[0] if not matrix_rows.empty else pd.Series(dtype=object)
+    manifest_row = manifest_rows.iloc[0] if not manifest_rows.empty else pd.Series(dtype=object)
+
+    st.subheader("Status Summary")
+    summary_rows = pd.DataFrame(
+        [
+            {"Signal": "Connector status", "Current state": first_value(manifest_row.get("connector_status", ""), profile.get("populated_source_status", "")) or "Not classified yet"},
+            {"Signal": "Source pattern", "Current state": first_value(matrix_row.get("source_archetype", ""), profile.get("connector_type", ""), profile.get("source_type", "")) or "Unknown"},
+            {"Signal": "Current extraction status", "Current state": first_value(manifest_row.get("run_mode", ""), profile.get("extraction_strategy", "")) or "Not attempted yet"},
+            {"Signal": "Next action", "Current state": first_value(manifest_row.get("next_action", ""), matrix_row.get("next_action", ""), profile.get("notes", "")) or "Review source registry and verification plan."},
+        ]
+    )
+    st.dataframe(summary_rows, hide_index=True, use_container_width=True)
+
+    st.subheader("Where Methodology Information Lives")
+    location_summary = first_value(
+        matrix_row.get("implementation_note", ""),
+        profile.get("notes", ""),
+        profile.get("extraction_strategy", ""),
+        resolution_rows.iloc[0].get("where_methodology_info_lives", "") if not resolution_rows.empty else "",
+    )
+    st.write(location_summary or "No plain-language source-location summary is available for this programme yet.")
+
+    st.subheader("Known Source URLs")
+    url_rows = []
+    for label, value in [
+        ("Methodology source URL", first_value(matrix_row.get("methodology_source_url", ""), profile.get("method_source_url", ""))),
+        ("Registry URL", first_value(matrix_row.get("registry_url", ""), profile.get("registry_url", ""))),
+        ("Document library URL", first_value(matrix_row.get("document_library_url", ""), profile.get("evidence_urls", ""))),
+        ("Current source URL", first_value(manifest_row.get("source_url", ""), profile.get("method_source_url", ""), profile.get("official_website", ""))),
+    ]:
+        if value:
+            url_rows.append({"Source": label, "url": value})
+    if url_rows:
+        show_dataframe(pd.DataFrame(url_rows), "programme_known_urls", height=180)
+    else:
+        st.info("No source URLs are recorded for this programme yet.")
+
+    st.subheader("Expected Fields")
+    field_text = first_value(matrix_row.get("fields_available", ""), matrix_row.get("fields_visible", ""))
+    fields = selected_field_rows(field_text)
+    if fields.empty:
+        st.info("No expected field inventory is recorded for this programme yet.")
+    else:
+        st.dataframe(fields, hide_index=True, use_container_width=True)
+
+    st.subheader("Recommended Connector Approach")
+    approach_rows = pd.DataFrame(
+        [
+            {"Question": "Extractor type", "Answer": first_value(matrix_row.get("extractor_type", ""), matrix_row.get("recommended_connector", ""), manifest_row.get("run_mode", "")) or "Not specified"},
+            {"Question": "Parsing plan", "Answer": first_value(matrix_row.get("implementation_note", ""), profile.get("extraction_strategy", "")) or "Verify source structure before coding."},
+            {"Question": "PDF plan", "Answer": first_value(matrix_row.get("pdf_strategy", "")) or "No PDF parsing plan recorded."},
+            {"Question": "Dedupe key", "Answer": first_value(matrix_row.get("dedupe_key", "")) or "Not specified yet."},
+            {"Question": "Confidence logic", "Answer": first_value(matrix_row.get("consensus_confidence", ""), profile.get("confidence", "")) or "Review required."},
+        ]
+    )
+    st.dataframe(approach_rows, hide_index=True, use_container_width=True)
+
+    st.subheader("Verification Checklist")
+    if verification_rows.empty:
+        st.info("No verification checklist rows are recorded for this programme.")
+    else:
+        show_dataframe(
+            select_existing(
+                verification_rows,
+                [
+                    "programme_name",
+                    "url_to_verify",
+                    "secondary_url_to_verify",
+                    "verification_priority",
+                    "what_to_check",
+                    "expected_result_from_reports",
+                    "disagreement_to_resolve",
+                    "recommended_connector_if_verified",
+                ],
+            ),
+            "programme_verification_checklist",
+            height=260,
+        )
+
+    st.subheader("Current Evidence")
+    method_rows = link_rows[
+        link_rows.get("candidate_type", pd.Series("", index=link_rows.index)).astype(str).eq("methodunit_candidate")
+    ].copy() if not link_rows.empty else pd.DataFrame(columns=CANDIDATE_SCHEMA)
+    metric_row(
+        [
+            ("Loaded candidate records", len(method_rows)),
+            ("Loaded evidence documents", len(document_rows)),
+            ("Source-resolution rows", len(resolution_rows)),
+        ]
+    )
+    if method_rows.empty and document_rows.empty and resolution_rows.empty:
+        st.info("No session or exported evidence is loaded for this programme yet. Run Source Explorer or load/export CSVs from Review Desk.")
+    else:
+        if not method_rows.empty:
+            with st.expander("Candidate records", expanded=True):
+                show_dataframe(select_existing(add_record_readiness(method_rows), CANDIDATE_SCHEMA + ["record_readiness"]), "programme_candidate_records", height=260)
+        if not document_rows.empty:
+            with st.expander("Evidence documents", expanded=True):
+                show_dataframe(select_existing(document_rows, SOURCE_DOCUMENT_SCHEMA), "programme_evidence_documents", height=260)
+        if not resolution_rows.empty:
+            with st.expander("Source-resolution context", expanded=False):
+                show_dataframe(select_existing(resolution_rows, SOURCE_RESOLUTION_SCHEMA), "programme_resolution_context", height=180)
+
+    with st.expander("Advanced details", expanded=False):
+        st.subheader("Raw Source Registry Rows")
+        show_dataframe(profile_rows, "programme_raw_source_profile", height=220)
+        st.subheader("Raw Connector Matrix Rows")
+        show_dataframe(matrix_rows, "programme_raw_connector_matrix", height=220)
+        st.subheader("Raw Connector Manifest Rows")
+        show_dataframe(manifest_rows, "programme_raw_connector_manifest", height=220)
+
+
 def interpreting_outputs_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("How to Read the Outputs")
     page_summary("Use this page before reviewing exported CSVs. It explains what each output means and what it does not mean.")
@@ -715,6 +1108,16 @@ def interpreting_outputs_page(data: dict[str, pd.DataFrame]) -> None:
             "Term": "Supporting Link",
             "Meaning": "A source URL captured during extraction, including PDFs, FAQs, templates, guidance pages, development pages, navigation links, and excluded links.",
             "How to Interpret": "Useful links are preserved even when they are not treated as methodology records.",
+        },
+        {
+            "Term": "Source Document",
+            "Meaning": "A normalized evidence/document row derived from extracted source links.",
+            "How to Interpret": "Use it as a review inventory; it does not replace the original extracted links CSV.",
+        },
+        {
+            "Term": "Source Verification Result",
+            "Meaning": "A reachability and source-behavior check for an official source URL.",
+            "How to Interpret": "Use it before connector coding to decide whether a source is reachable, document-first, or requires URL repair.",
         },
         {
             "Term": "Issue to Resolve",
@@ -739,6 +1142,7 @@ def interpreting_outputs_page(data: dict[str, pd.DataFrame]) -> None:
     st.write("- `review_status = pending_review` means human review is still required.")
     st.write("- High confidence means extraction confidence, not business, legal, or carbon-market approval.")
     st.write("- Supporting documents are preserved as Supporting Links but separated from extracted methodology records.")
+    st.write("- Source documents and connector manifest rows are derived review aids; they preserve the original extraction outputs.")
 
 
 def live_source_check_page(data: dict[str, pd.DataFrame]) -> None:
@@ -837,6 +1241,9 @@ def live_source_check_page(data: dict[str, pd.DataFrame]) -> None:
                 results.append(run_source_check(row))
             progress.empty()
             st.session_state["live_source_check_results"] = pd.DataFrame(results)
+            st.session_state["source_verification_results"] = normalize_source_verification_results(
+                st.session_state["live_source_check_results"]
+            )
 
     results_df = st.session_state.get("live_source_check_results", pd.DataFrame())
     if not results_df.empty:
@@ -861,6 +1268,7 @@ def live_source_check_page(data: dict[str, pd.DataFrame]) -> None:
             "error",
         ]
         show_dataframe(select_existing(results_df, display_columns), "live_source_check_results", height=460)
+        st.caption("These source checks are also available as `source_verification_results.csv` in the Export page.")
     else:
         st.info("Select programmes and run a check to see results here.")
 
@@ -934,7 +1342,7 @@ def candidate_extraction_page(data: dict[str, pd.DataFrame]) -> None:
             {
                 "Output": "Extracted records",
                 "Count": methodunit_count,
-                "Next tab": "Review Extracted Records",
+                "Next tab": "Candidate Methods",
                 "Purpose": "Review possible methodology/protocol records before catalogue export.",
             },
             {
@@ -1131,7 +1539,7 @@ def source_registry_workflow_page(data: dict[str, pd.DataFrame]) -> None:
     st.subheader("Live Source Check Summary")
     checks = st.session_state.get("live_source_check_results", pd.DataFrame())
     if checks.empty:
-        st.info("No live source check results in the current session. Use Extract from Sources to perform a pre-check.")
+        st.info("No live source check results in the current session. Use Source Explorer to perform a pre-check.")
     else:
         chart = value_counts_df(checks, "check_status", "check_status")
         show_bar_chart(chart, "check_status", "count", "Live source check status summary is unavailable.")
@@ -1258,7 +1666,7 @@ def source_resolution_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def candidate_review_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Review Extracted Records")
+    st.header("Candidate Methods")
     page_summary("Review possible methodology/protocol records before they are exported to a catalogue.")
     st.info(
         "Purpose: check extracted records before catalogue handoff. Extracted records are not automatically approved methodologies. "
@@ -1290,7 +1698,7 @@ def candidate_review_page(data: dict[str, pd.DataFrame]) -> None:
 
     st.caption(f"Review queue source: {source_label}")
     if candidates.empty:
-        st.info("No extracted records are loaded yet. Go to Extract from Sources and run Climate Action Reserve or City Forest Credits, or use Source Resolution for Artisan C-sink.")
+        st.info("Run Source Explorer or load exported CSVs to review records.")
         return
 
     if "candidate_type" in candidates.columns:
@@ -1304,10 +1712,17 @@ def candidate_review_page(data: dict[str, pd.DataFrame]) -> None:
         "Review decision for displayed rows",
         ["pending_review", "needs_research", "approved", "rejected"],
         key="candidate_review_decision",
-        help="This decision is added for display/download only and is not written to disk automatically.",
+        help="This decision is added to the displayed rows and is written only when you click Save review decisions.",
+    )
+    reviewer_note = st.text_area(
+        "Reviewer note for displayed rows",
+        value="",
+        key="candidate_review_note",
+        help="Optional note saved with the review decision for the currently displayed rows.",
     )
     filtered = filtered.copy()
     filtered["review_decision"] = decision
+    filtered["reviewer_note"] = reviewer_note
     display_columns = [
         "program_name",
         "methodunit_code",
@@ -1322,16 +1737,38 @@ def candidate_review_page(data: dict[str, pd.DataFrame]) -> None:
         "confidence",
         "review_status",
         "review_decision",
+        "reviewer_note",
         "notes",
     ]
     show_dataframe(select_existing(filtered, display_columns), "candidate_review_queue", height=500)
 
+    st.subheader("Persist Review Decisions")
+    st.caption("Saves a local review-decision CSV in outputs/. Existing extraction records are not overwritten.")
+    if st.button("Save review decisions for displayed rows", disabled=filtered.empty):
+        now = pd.Timestamp.now().isoformat(timespec="seconds")
+        decisions = filtered.copy()
+        decisions["reviewed_at"] = now
+        decisions["previous_review_status"] = decisions.get("review_status", "")
+        decision_rows = select_existing(ensure_columns(decisions, REVIEW_DECISION_SCHEMA), REVIEW_DECISION_SCHEMA)
+        path = save_review_decisions(decision_rows)
+        if path is None:
+            st.warning("No review decision rows were available to save.")
+        else:
+            st.success(f"Saved review decisions to {path}")
+
+    saved_decisions = current_review_decisions()
+    if saved_decisions.empty:
+        st.info("No persisted review decisions are loaded yet.")
+    else:
+        with st.expander("Saved review decisions", expanded=False):
+            show_dataframe(select_existing(saved_decisions, REVIEW_DECISION_SCHEMA), "saved_review_decisions", height=260)
+
 
 def evidence_links_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Supporting Links")
-    page_summary("Useful links found during extraction that are preserved separately from extracted methodology records.")
+    st.header("Evidence Documents")
+    page_summary("Useful links and normalized document rows preserved separately from candidate methodology records.")
     st.info(
-        "These links are produced by Extract from Sources. They are useful context, but they are not treated as methodology records. "
+        "These links are produced by Source Explorer and advanced extraction controls. They are useful context, but they are not treated as methodology records. "
         "Examples include PDFs, FAQs, templates, guidance pages, development pages, navigation links, and excluded links."
     )
     links, source_label = session_or_output(
@@ -1361,6 +1798,38 @@ def evidence_links_page(data: dict[str, pd.DataFrame]) -> None:
         "evidence_links",
     )
     show_dataframe(select_existing(filtered, CANDIDATE_SCHEMA), "evidence_links", height=520)
+
+    st.subheader("Normalized Source Documents")
+    st.write(
+        "This derived table converts extracted links into a document/evidence inventory. "
+        "It preserves the original supporting-link output while making evidence easier to review and export."
+    )
+    documents = build_source_documents(filtered)
+    if documents.empty:
+        st.info("No document/evidence rows are available for the current filters.")
+    else:
+        document_filters = inline_filters(
+            documents,
+            ["document_category", "evidence_stage", "program_name", "review_status"],
+            "source_documents",
+        )
+        show_dataframe(select_existing(document_filters, SOURCE_DOCUMENT_SCHEMA), "source_documents", height=420)
+
+
+def review_decisions_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Review Decisions")
+    page_summary("Persisted human review decisions for candidate records and evidence handoff.")
+    st.write("Review decisions are saved separately from extracted records so the original extraction output remains unchanged.")
+    decisions = current_review_decisions()
+    if decisions.empty:
+        st.info("No persisted review decisions are loaded yet. Use Candidate Methods to save decisions for displayed rows.")
+        return
+    filtered = inline_filters(
+        decisions,
+        ["program_name", "review_decision", "record_readiness", "confidence", "previous_review_status"],
+        "review_decisions",
+    )
+    show_dataframe(select_existing(filtered, REVIEW_DECISION_SCHEMA), "review_decisions", height=460)
 
 
 def qa_exceptions_page(data: dict[str, pd.DataFrame]) -> None:
@@ -1417,6 +1886,19 @@ def qa_exceptions_page(data: dict[str, pd.DataFrame]) -> None:
         st.info("No failed Live Source Check rows in the current session.")
     else:
         show_dataframe(select_existing(failures, ["checked_at", "program_name", "source_url", "status_code", "check_status", "error"]), "qa_exceptions_source_access", height=240)
+
+    st.subheader("Source Verification Results")
+    verification, verification_source = session_or_output(
+        current_source_verification_results(),
+        "source_verification_results.csv",
+        "source_verification_results",
+        SOURCE_VERIFICATION_SCHEMA,
+    )
+    st.caption(f"Source verification data source: {verification_source}")
+    if verification.empty:
+        st.info("No source verification rows are loaded. Run a source access check from Source Explorer to create them.")
+    else:
+        show_dataframe(select_existing(verification, SOURCE_VERIFICATION_SCHEMA), "qa_source_verification_results", height=280)
 
     st.subheader("Extraction Errors")
     errors, source_label = session_or_output(
@@ -1504,14 +1986,35 @@ def export_page(data: dict[str, pd.DataFrame]) -> None:
         "source_resolution_results",
         SOURCE_RESOLUTION_SCHEMA,
     )
+    source_documents, source_documents_source = session_or_output(
+        current_source_documents(),
+        "source_documents.csv",
+        "source_documents",
+        SOURCE_DOCUMENT_SCHEMA,
+    )
+    source_verification, source_verification_source = session_or_output(
+        current_source_verification_results(),
+        "source_verification_results.csv",
+        "source_verification_results",
+        SOURCE_VERIFICATION_SCHEMA,
+    )
+    review_decisions, review_decisions_source = session_or_output(
+        current_review_decisions(),
+        "review_decisions.csv",
+        "review_decisions",
+        REVIEW_DECISION_SCHEMA,
+    )
+    connector_manifest = build_connector_manifest(data)
     source_registry = data.get("source_profiles", pd.DataFrame())
     qa = data.get("qa_flags", pd.DataFrame())
     st.caption(
         f"Export sources: records = {methodunit_source}; supporting links = {links_source}; "
-        f"extraction errors = {errors_source}; source resolution = {source_resolution_source}."
+        f"source documents = {source_documents_source}; extraction errors = {errors_source}; "
+        f"source resolution = {source_resolution_source}; source verification = {source_verification_source}; "
+        f"review decisions = {review_decisions_source}."
     )
 
-    if methodunits.empty and links.empty and errors.empty and source_resolution.empty:
+    if methodunits.empty and links.empty and errors.empty and source_resolution.empty and source_documents.empty and source_verification.empty:
         st.info(
             "No extraction or source-resolution output is available yet. Run a quick demo extraction or resolve Artisan C-sink before returning here to export."
         )
@@ -1519,8 +2022,12 @@ def export_page(data: dict[str, pd.DataFrame]) -> None:
     downloads = [
         ("Current extracted methodology records", methodunits, "methodunit_candidates_review.csv"),
         ("Full Supporting Links", links, "extracted_source_links_full.csv"),
+        ("Normalized source documents", source_documents, "source_documents.csv"),
         ("Extraction errors", errors, "extraction_errors.csv"),
         ("Source-resolution results", source_resolution, "source_resolution_results.csv"),
+        ("Source-verification results", source_verification, "source_verification_results.csv"),
+        ("Review decisions", review_decisions, "review_decisions.csv"),
+        ("Connector manifest", connector_manifest, "connector_manifest.csv"),
         ("Source Registry table", source_registry, "source_registry.csv"),
         ("QA flags", qa, "qa_flags.csv"),
     ]
@@ -1533,6 +2040,19 @@ def export_page(data: dict[str, pd.DataFrame]) -> None:
             key=f"export_{file_name}",
             disabled=df.empty,
         )
+
+    st.subheader("Export Data Dictionary")
+    dictionary_rows = [
+        {"CSV": "methodunit_candidates_review.csv", "Purpose": "Candidate methodology/protocol records requiring human review before catalogue use."},
+        {"CSV": "extracted_source_links_full.csv", "Purpose": "Full classified extraction output, including supporting, navigation, development, and excluded links."},
+        {"CSV": "source_documents.csv", "Purpose": "Normalized document/evidence inventory derived from extracted source links."},
+        {"CSV": "extraction_errors.csv", "Purpose": "Access, fetch, parsing, or classification issues from extraction runs."},
+        {"CSV": "source_resolution_results.csv", "Purpose": "Where methodology information lives for no-index or document-family sources."},
+        {"CSV": "source_verification_results.csv", "Purpose": "Reachability and source behavior checks performed before connector implementation."},
+        {"CSV": "review_decisions.csv", "Purpose": "Persisted local reviewer decisions; does not overwrite extracted records."},
+        {"CSV": "connector_manifest.csv", "Purpose": "Operational connector metadata and current implementation posture by programme."},
+    ]
+    st.dataframe(pd.DataFrame(dictionary_rows), hide_index=True, use_container_width=True)
 
     st.subheader("Save Timestamped Outputs")
     st.caption("Writes available current outputs into the local outputs/ folder using timestamped filenames.")
@@ -1548,36 +2068,36 @@ def export_page(data: dict[str, pd.DataFrame]) -> None:
 
 def overview_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Carbon Methodology Intelligence Platform")
-    st.subheader("Understanding how methodology information is published, discovered, and operationalized across global carbon programmes.")
+    st.subheader("Map where methodology information lives, extract what can be extracted, and preserve evidence for human review.")
 
     profiles = data.get("source_profiles", pd.DataFrame())
     if not require_rows(profiles, "source registry"):
         return
     plan = derive_onboarding_plan(profiles)
-    status = programme_status_counts(profiles, plan)
+    metrics = platform_metric_values(data)
 
-    st.subheader("Executive Snapshot")
+    st.subheader("Platform Snapshot")
     metric_row(
         [
-            ("Total programmes", status["total_programmes"]),
-            ("Programmes mapped", status["programmes_mapped"]),
-            ("Programmes requiring investigation", status["programmes_requiring_investigation"]),
-            ("Operational / partial connectors", status["operational_connectors"]),
+            ("Programmes tracked", metrics["programmes_tracked"]),
+            ("Working / partial connectors", metrics["working_partial_connectors"]),
+            ("Researched next sources", metrics["researched_next_sources"]),
+            ("Recommended next builds", metrics["recommended_next_builds"]),
         ]
     )
 
-    st.subheader("Source Landscape")
-    pattern_counts = source_pattern_counts(profiles)
-    show_bar_chart(pattern_counts, "Source pattern", "Programmes", "No source pattern counts are available.")
-    st.dataframe(pattern_counts, hide_index=True, use_container_width=True)
-
-    st.subheader("Coverage Maturity")
-    maturity = maturity_counts(plan)
-    show_bar_chart(maturity, "Coverage maturity", "Programmes", "No coverage maturity counts are available.")
-    st.dataframe(maturity, hide_index=True, use_container_width=True)
+    st.subheader("What This Platform Does")
+    st.write("- Maps where methodology source information lives across carbon programmes.")
+    st.write("- Runs source-specific connectors for sources that can be extracted safely.")
+    st.write("- Preserves evidence, documents, and source URLs behind candidate records.")
+    st.write("- Flags uncertain, broken, access-limited, or source-resolution cases.")
+    st.write("- Creates review and export packages for human-controlled catalogue work.")
 
     st.subheader("Current Priorities")
-    priorities = connector_priority_rows(data, plan)
+    matrix = data.get("connector_source_matrix", pd.DataFrame())
+    priorities = compact_roadmap_table(matrix)
+    if priorities.empty:
+        priorities = connector_priority_rows(data, plan)
     st.dataframe(priorities, hide_index=True, use_container_width=True)
 
     st.subheader("Platform Workflow")
@@ -1586,8 +2106,19 @@ def overview_page(data: dict[str, pd.DataFrame]) -> None:
         "Evidence Review -> Methodology Intelligence**"
     )
 
-    with st.expander("Detailed registry preview", expanded=False):
-        section_note("Detailed programme rows remain available here and on the Source Registry page.")
+    with st.expander("Advanced landscape details", expanded=False):
+        st.subheader("Source Patterns")
+        pattern_counts = source_pattern_counts(profiles)
+        st.dataframe(pattern_counts, hide_index=True, use_container_width=True)
+
+        st.subheader("Coverage Maturity")
+        maturity = maturity_counts(plan)
+        st.dataframe(maturity, hide_index=True, use_container_width=True)
+
+        connector_manifest_panel(data, "overview_connector_manifest")
+
+        st.subheader("Detailed Registry Preview")
+        section_note("Detailed programme rows remain available for audit and troubleshooting.")
         display_columns = [
             "program_name",
             "current_source_url",
@@ -1802,16 +2333,14 @@ def ingestion_workflow_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def explore_source_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Connector Pipeline")
+    st.header("Source Explorer")
     page_summary("Choose a source and see what the platform found: records, documents, issues, and the recommended next action.")
     st.write("Pick a source, run exploration, and review what happened.")
 
-    st.info(
-        "**Recommended demo path**\n\n"
-        "- CAR: clean methodology/protocol table.\n"
-        "- City Forest Credits: document/protocol-family source.\n"
-        "- Artisan C-sink: no clean methodology page; source-resolution case."
-    )
+    with st.expander("Recommended demo path", expanded=False):
+        st.write("- CAR: clean methodology/protocol table.")
+        st.write("- City Forest Credits: document/protocol-family source.")
+        st.write("- Artisan C-sink: no clean methodology page; source-resolution case.")
 
     source_context = {
         "Climate Action Reserve": {
@@ -1898,7 +2427,6 @@ def explore_source_page(data: dict[str, pd.DataFrame]) -> None:
         pd.DataFrame(
             [
                 {"Result": "Source", "Value": summary.get("Source", "")},
-                {"Result": "Mode used", "Value": summary.get("Mode used", "")},
                 {"Result": "Recommended next action", "Value": summary.get("Recommended next action", "")},
             ]
         ),
@@ -1913,7 +2441,10 @@ def explore_source_page(data: dict[str, pd.DataFrame]) -> None:
         st.warning("Issues were logged. Review them before using the output package.")
         show_dataframe(select_existing(errors, EXTRACTION_ERROR_SCHEMA), "explore_source_errors", height=180)
 
-    st.info("Review extracted records and evidence on the **Evidence & Review** page.")
+    with st.expander("Advanced run details", expanded=False):
+        st.write(f"Internal mode used: {summary.get('Mode used', '')}")
+
+    st.info("Review extracted records and evidence on the **Review Desk** page.")
 
     with st.expander("Advanced connector controls", expanded=False):
         st.caption("Operational controls remain available for source checks, multi-source extraction, and source-resolution review.")
@@ -2025,11 +2556,11 @@ def coverage_progress_page(data: dict[str, pd.DataFrame]) -> None:
 
 
 def evidence_and_review_page(data: dict[str, pd.DataFrame]) -> None:
-    st.header("Evidence & Review")
-    page_summary("Extracted records, supporting material, issues, and export — all read from the latest extraction outputs.")
+    st.header("Review Desk")
+    page_summary("Review candidate methods, evidence documents, issues, decisions, and export packages.")
     st.write(
-        "This page shows what extraction produced and how records should be reviewed before catalogue export. "
-        "Extracted records are not automatically approved methodologies."
+        "Candidate records are not approved methodologies until reviewed. "
+        "Use this desk to inspect records, preserve evidence, record decisions, and export handoff files."
     )
 
     candidates = apply_output_safeguards(
@@ -2042,8 +2573,7 @@ def evidence_and_review_page(data: dict[str, pd.DataFrame]) -> None:
 
     if candidates.empty and errors.empty:
         st.info(
-            "No extraction outputs are loaded in this session. "
-            "Open **Connector Pipeline**, choose a source, and run exploration to produce records, then return here."
+            "Run Source Explorer or load exported CSVs to review records."
         )
     else:
         with st.expander("Result interpretation summary", expanded=True):
@@ -2051,7 +2581,7 @@ def evidence_and_review_page(data: dict[str, pd.DataFrame]) -> None:
                 st.caption(f"Latest session run: {last_run}")
             render_result_interpretation(candidates, errors)
 
-    tabs = st.tabs(["Extracted Records", "Supporting Material", "Issues", "Export", "How to Read Outputs"])
+    tabs = st.tabs(["Candidate Methods", "Evidence Documents", "Issues", "Review Decisions", "Exports"])
     with tabs[0]:
         candidate_review_page(data)
     with tabs[1]:
@@ -2059,13 +2589,94 @@ def evidence_and_review_page(data: dict[str, pd.DataFrame]) -> None:
     with tabs[2]:
         qa_exceptions_page(data)
     with tabs[3]:
-        export_page(data)
+        review_decisions_page(data)
     with tabs[4]:
+        export_page(data)
+
+    with st.expander("Advanced details", expanded=False):
         interpreting_outputs_page(data)
+        methodunit_dossier_page(data)
 
 
 def exports_page(data: dict[str, pd.DataFrame]) -> None:
     export_page(data)
+
+
+def connector_roadmap_platform_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Connector Roadmap")
+    page_summary("Future source integration planning from research audits and verification plans.")
+    st.info(
+        "This roadmap identifies where methodology information appears to live and what connector pattern should be tested. "
+        "It does not mean these sources have already been extracted."
+    )
+    source_intelligence_warnings(data)
+
+    matrix = data.get("connector_source_matrix", pd.DataFrame())
+    verification_plan = data.get("source_verification_plan", pd.DataFrame())
+    view = connector_matrix_view(matrix)
+
+    metric_values = dict(connector_roadmap_metrics(matrix))
+    metric_row(
+        [
+            ("Researched sources", metric_values.get("Total researched sources", 0)),
+            ("Ready for verification", metric_values.get("Needs verification", 0)),
+            ("PDF-first sources", metric_values.get("Requires PDF parsing", 0)),
+            ("JS / API sources", metric_values.get("Requires JS / Playwright", 0)),
+        ]
+    )
+
+    st.subheader("Recommended Build Sequence")
+    compact = compact_roadmap_table(matrix)
+    if compact.empty:
+        st.info("No source-intelligence matrix is loaded yet.")
+    else:
+        st.dataframe(compact, hide_index=True, use_container_width=True)
+
+    if not view.empty:
+        readiness_text = combined_text(view, ["verification_needed", "next_action", "implementation_note"])
+        pdf_text = combined_text(view, ["pdf_strategy", "source_archetype", "extractor_type"])
+        js_text = combined_text(view, ["js_required", "api_visible", "source_archetype", "extractor_type", "recommended_connector"])
+        disagreement_text = combined_text(view, ["disagreement_level", "known_disagreement"])
+
+        sections = [
+            ("Sources Ready for Verification", view[text_contains_any(readiness_text, ["yes", "verify", "verification", "fetch", "check"])]),
+            ("PDF-First Sources", view[text_contains_any(pdf_text, ["pdf", "document"])]),
+            ("JS / API Sources", view[text_contains_any(js_text, ["yes", "js", "api", "playwright", "browser"])]),
+            ("Disputed or Contradictory Sources", view[text_contains_any(disagreement_text, ["high", "medium", "contradict", "disput", "differ"])]),
+        ]
+        for title, section_df in sections:
+            st.subheader(title)
+            if section_df.empty:
+                st.info(f"No {title.lower()} are identified in the loaded roadmap.")
+            else:
+                show_dataframe(
+                    select_existing(
+                        section_df,
+                        [
+                            "programme_name",
+                            "recommended_priority",
+                            "source_archetype",
+                            "extractor_type",
+                            "methodology_source_url",
+                            "records_expected",
+                            "fields_available",
+                            "next_action",
+                            "known_disagreement",
+                        ],
+                    ),
+                    re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_"),
+                    height=240,
+                )
+
+    with st.expander("Advanced details", expanded=False):
+        connector_roadmap_page(data)
+        st.subheader("Full Connector Manifest")
+        connector_manifest_panel(data, "roadmap_connector_manifest")
+        if verification_plan.empty:
+            st.info("No verification plan CSV is loaded.")
+        else:
+            st.subheader("Full Verification Plan")
+            show_dataframe(verification_plan, "roadmap_full_verification_plan", height=360)
 
 
 def ai_assisted_scaling_page(data: dict[str, pd.DataFrame]) -> None:
@@ -2074,6 +2685,8 @@ def ai_assisted_scaling_page(data: dict[str, pd.DataFrame]) -> None:
     if not profiles.empty:
         st.subheader("Connector Priorities")
         st.dataframe(connector_priority_rows(data, derive_onboarding_plan(profiles)), hide_index=True, use_container_width=True)
+
+    connector_manifest_panel(data, "strategy_connector_manifest")
 
     connector_roadmap_page(data)
 
@@ -2129,6 +2742,58 @@ def ai_assisted_scaling_page(data: dict[str, pd.DataFrame]) -> None:
     st.write("- Source-specific deterministic extractors remain the first layer.")
 
 
+def method_about_page(data: dict[str, pd.DataFrame]) -> None:
+    st.header("Method / About")
+    page_summary("How the platform thinks about methodology sources, connectors, evidence, and review.")
+
+    st.subheader("Why Universal Methodology Extraction Is Hard")
+    st.write(
+        "Carbon programmes publish methodology information in many forms: clean HTML tables, document libraries, "
+        "PDF families, adopted external methods, registry portals, and sometimes no dedicated methodology page at all. "
+        "A single generic scraper would miss too much context and overstate confidence."
+    )
+
+    st.subheader("How Source Intelligence Works")
+    st.write(
+        "Source intelligence maps where methodology information appears to live, what fields seem visible, "
+        "which URLs need verification, and what connector pattern should be tested before implementation."
+    )
+
+    st.subheader("What a Connector Does")
+    st.write(
+        "A connector is a small source-specific routine. It fetches only bounded public source pages, extracts visible "
+        "candidate records or document links, preserves source URLs, and logs issues separately."
+    )
+
+    st.subheader("What Candidate Records Mean")
+    st.write(
+        "Candidate records are possible methodology, protocol, or document-family records. "
+        "They are not approved methodologies until a human reviewer checks the source evidence."
+    )
+
+    st.subheader("Why Evidence Links Are Preserved Separately")
+    st.write(
+        "Supporting documents, PDFs, guidance pages, development pages, and excluded links help reviewers understand the source. "
+        "They are kept separate from candidate methodology records so catalogue exports stay reviewable."
+    )
+
+    st.subheader("Why Human Review Is Required")
+    st.write(
+        "Extraction confidence means the source structure looked readable, not that the record is commercially, legally, "
+        "or carbon-market approved. Human review decides whether a candidate should be accepted, edited, rejected, or researched further."
+    )
+
+    st.subheader("How Verification-Before-Implementation Works")
+    st.write(
+        "Before building a new connector, the platform verifies whether the source URL is reachable, whether content is static or dynamic, "
+        "which documents are visible, whether PDFs are involved, and whether reports disagree about the source."
+    )
+
+    with st.expander("Advanced details", expanded=False):
+        interpreting_outputs_page(data)
+        connector_manifest_panel(data, "method_about_connector_manifest")
+
+
 def main() -> None:
     data = load_data()
     st.title(APP_TITLE)
@@ -2138,30 +2803,27 @@ def main() -> None:
     page = st.sidebar.radio(
         "Pages",
         [
-            "Overview",
-            "Source Registry",
-            "Coverage Explorer",
-            "Evidence & Review",
-            "Connector Pipeline",
-            "Exports",
-            "Strategy",
+            "Home",
+            "Programme Intelligence",
+            "Source Explorer",
+            "Review Desk",
+            "Connector Roadmap",
+            "Method / About",
         ],
     )
 
-    if page == "Overview":
+    if page == "Home":
         overview_page(data)
-    elif page == "Source Registry":
-        source_registry_page(data)
-    elif page == "Coverage Explorer":
-        coverage_progress_page(data)
-    elif page == "Evidence & Review":
-        evidence_and_review_page(data)
-    elif page == "Connector Pipeline":
+    elif page == "Programme Intelligence":
+        programme_intelligence_page(data)
+    elif page == "Source Explorer":
         explore_source_page(data)
-    elif page == "Exports":
-        exports_page(data)
-    elif page == "Strategy":
-        ai_assisted_scaling_page(data)
+    elif page == "Review Desk":
+        evidence_and_review_page(data)
+    elif page == "Connector Roadmap":
+        connector_roadmap_platform_page(data)
+    elif page == "Method / About":
+        method_about_page(data)
 
 
 if __name__ == "__main__":

@@ -8,29 +8,39 @@
 
 Carbon methodology information is scattered across heterogeneous official sources: structured HTML tables, methodology catalogues with detail pages, PDF / document families, adopted external methods, JS-heavy portals, and small programmes with no clear methodology page. One generic scraper is not enough.
 
-## Five Ideas This App Is Built Around
+## Six Ideas This App Is Built Around
 
 1. **Source map.** A picture of the source universe and how heterogeneous it is.
 2. **Assembly line.** A pipeline from official source to review-ready catalogue export, with operational controls to run each step.
 3. **Coverage progress tracker.** Source-by-source implementation state, plus onboarding waves.
 4. **Evidence-first review.** Every extracted record is paired with its supporting material, its issues, and an export handoff — nothing goes to a catalogue automatically.
-5. **AI-assisted analyst.** A roadmap for AI to help on messy cases with clear evidence and human control.
+5. **Connector governance.** Source verification, connector capability metadata, and reviewer decisions make the workbench easier to demo and easier to extend.
+6. **AI-assisted analyst.** A roadmap for AI to help on messy cases with clear evidence and human control.
 
 The current app is framed as an ecosystem intelligence platform first, with SourceOps workflows available as operational controls behind the platform views.
 
 ## App Pages
 
-1. **Overview** - executive metrics, source landscape, coverage maturity, current connector priorities, and platform workflow.
-2. **Source Registry** - detailed programme-level source intelligence and official URLs.
-3. **Coverage Explorer** - implementation status, recommended next sources, onboarding waves, and source-resolution audit coverage.
-4. **Evidence & Review** - extracted records, supporting material, issues, export, and output interpretation.
-5. **Connector Pipeline** - source exploration controls plus advanced source checks, extraction, and source-resolution workflows.
-6. **Exports** - review-ready CSV downloads and timestamped output saves.
-7. **Strategy** - connector priorities, AI-assisted scaling roadmap, future task schema, and guardrails.
+1. **Home** - executive platform snapshot, plain-language purpose, current priorities, and advanced landscape details.
+2. **Programme Intelligence** - programme dossier with source status, URLs, connector approach, verification checklist, and loaded evidence.
+3. **Source Explorer** - simple source exploration flow plus advanced source checks, extraction, and source-resolution controls.
+4. **Review Desk** - candidate methods, evidence documents, issues, review decisions, and exports.
+5. **Connector Roadmap** - future build planning from source intelligence and verification plans.
+6. **Method / About** - explanation of the SourceOps method, evidence model, and verification-before-implementation workflow.
+
+## Connector Governance
+
+The app exposes a lightweight connector manifest and richer review handoff files:
+
+- **Connector capability matrix** - derived from the Source Registry and research matrix; describes connector status, run mode, expected outputs, capabilities, and next action.
+- **Source verification results** - produced from source access checks; records whether a URL was reached, what type of content was found, and the recommended next action before connector coding.
+- **Normalized source documents** - derived from extracted supporting links; preserves the original extraction output while creating a document/evidence inventory for review.
+- **Review decisions** - optional local reviewer decisions saved only when explicitly requested; extracted records are not overwritten.
+- **MethodUnit dossier** - combines candidate records, evidence links, source-resolution context, issues, and connector metadata for one programme.
 
 ## Source Intelligence Inputs
 
-The Strategy page also reads research-derived source intelligence from `data/source_intelligence/`:
+The Connector Roadmap and Programme Intelligence pages read research-derived source intelligence from `data/source_intelligence/`:
 
 - `connector_source_matrix_synthesized.csv` powers the Connector Roadmap table and roadmap metrics.
 - `connector_source_matrix_synthesized.json` provides metadata such as the matrix generation timestamp.
@@ -38,13 +48,14 @@ The Strategy page also reads research-derived source intelligence from `data/sou
 
 This supports a verification-before-implementation workflow: research identifies where methodology information appears to live, analysts verify the source behavior, and only then should a connector be implemented.
 
-## Previous Prototype Page Framing
+## User Flow
 
-1. **Source Landscape** — the source universe: total programmes, source archetypes, and the filterable source registry.
-2. **Ingestion Workflow** — the pipeline visual, stage status, and the operational controls (Quick Demo, Source Access Check, Extract or Resolve Records, Source Resolution).
-3. **Coverage Progress** — source-by-source implementation status, recommended next sources, and onboarding waves.
-4. **Evidence & Review** — result interpretation summary, then tabs for Extracted Records, Supporting Material, Issues, and Export.
-5. **AI-Assisted Scaling** — messy-case catalogue, future AI workflow visual, future task output schema, and guardrails.
+1. **Home** answers the state of the source landscape.
+2. **Programme Intelligence** answers what is known about one programme.
+3. **Source Explorer** runs or verifies a source.
+4. **Review Desk** shows what records and evidence are ready for review or export.
+5. **Connector Roadmap** turns research audits into future build planning.
+6. **Method / About** explains the operating method and review guardrails.
 
 ## Workflow
 
@@ -69,7 +80,7 @@ Source-specific extractors are small, source-aware ingestion routines — not on
 - **Asia Carbon Institute** — source-access / SSL exception handling; not bypassed by default.
 - **City Forest Credits** — document / protocol-family extraction; linked PDFs are discovered but not fully parsed.
 
-Other programmes appear in the Source Landscape and Coverage Progress views but do not yet have implemented extractors.
+Other programmes appear in Home, Programme Intelligence, and Connector Roadmap views but do not yet have implemented extractors.
 
 ## Source Resolution
 
@@ -87,14 +98,14 @@ The current implemented example is **Artisan C-sink**:
 
 The app fetches only the public source page, does not parse full PDFs, creates one pending-review document-family record, preserves clarification documents as Supporting Material, and logs missing or unstable document links as Issues. This directly addresses standards with one or a few methodologies where a full catalogue scraper would be unnecessary.
 
-The app also loads `data/source_resolution_audit_mid_activity.csv` when present. That file is a review-ready source-resolution audit for mid-activity standards, not approved catalogue truth. It classifies sources into catalogue actions such as automated extraction, document-family capture, adopted-method pointer, access request, project-derived review, unresolved, or parked. The Source Resolution and Coverage Progress pages summarize it, and Evidence & Review surfaces audit rows that need issue records or follow-up. Audit rows do not automatically generate methodology catalogue exports.
+The app also loads `data/source_resolution_audit_mid_activity.csv` when present. That file is a review-ready source-resolution audit for mid-activity standards, not approved catalogue truth. It classifies sources into catalogue actions such as automated extraction, document-family capture, adopted-method pointer, access request, project-derived review, unresolved, or parked. Advanced details summarize it, and Review Desk surfaces audit rows that need issue records or follow-up. Audit rows do not automatically generate methodology catalogue exports.
 
 ## Session-State Model
 
 The app treats extraction and source resolution as producer steps, and everything downstream as consumers of the latest outputs:
 
-- **Producers**: Quick Demo, Step 2: Extract or resolve records, and Source Resolution on the Ingestion Workflow page.
-- **Consumers**: Evidence & Review (Extracted Records, Supporting Material, Issues, Export).
+- **Producers**: Source Explorer and its advanced source-check, extraction, and source-resolution controls.
+- **Consumers**: Review Desk (Candidate Methods, Evidence Documents, Issues, Review Decisions, Exports).
 
 All producers write to the same session-state keys (`candidate_extraction_results`, `candidate_extraction_errors`, `candidate_extraction_enrichment_metrics`, `candidate_extraction_sources_attempted`). Consumers read those same keys and fall back to the latest saved `outputs/` CSVs if no session data is loaded. A quick demo run or Source Resolution run therefore populates the same downstream tabs as a full extraction run.
 
@@ -160,20 +171,25 @@ Expected input files under `data/`:
 
 ## Outputs
 
-The Evidence & Review → Export tab can write timestamped files to `outputs/`, including:
+The Review Desk -> Exports tab can write timestamped files to `outputs/`, including:
 
 - `methodunit_candidates_review_YYYYMMDD_HHMMSS.csv`
 - `extracted_source_links_full_YYYYMMDD_HHMMSS.csv`
+- `source_documents_YYYYMMDD_HHMMSS.csv`
 - `extraction_errors_YYYYMMDD_HHMMSS.csv`
+- `source_resolution_results_YYYYMMDD_HHMMSS.csv`
+- `source_verification_results_YYYYMMDD_HHMMSS.csv`
+- `review_decisions_YYYYMMDD_HHMMSS.csv`
+- `connector_manifest_YYYYMMDD_HHMMSS.csv`
 - `source_registry_YYYYMMDD_HHMMSS.csv`
 - `qa_flags_YYYYMMDD_HHMMSS.csv`
 
 ## Next Development Priorities
 
-1. Repair or confirm stale Source Registry URLs before building more extractors.
-2. Follow the Coverage Progress wave order to pick the next extractor.
+1. Repair or confirm stale source-registry URLs before building more extractors.
+2. Follow the Connector Roadmap and verification plan to pick the next extractor.
 3. Add Plan Vivo and Climate Forward as the next controlled extractors.
 4. Add the next stable HTML catalogue extractor (likely ACR after URL repair).
 5. Add controlled PDF metadata extraction for document-first sources.
 6. Prototype a bounded AI-assist step for one messy case (for example, ICR title suggestions from detail-page text).
-7. Add persistent review decisions and catalogue import validation once the extracted-record schema stabilizes.
+7. Add catalogue import validation once the extracted-record and review-decision schemas stabilize.

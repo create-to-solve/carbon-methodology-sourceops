@@ -18,6 +18,7 @@ from pipeline import (  # noqa: E402
     FILES,
     SOURCE_RESOLUTION_SCHEMA,
     apply_output_safeguards,
+    build_source_documents,
     load_csv,
 )
 
@@ -92,6 +93,7 @@ def main() -> None:
 
     links_df = candidate_frame(all_candidates)
     methodunits_df = links_df[links_df["candidate_type"].eq("methodunit_candidate")].copy()
+    documents_df = build_source_documents(links_df)
     errors_df = error_frame(all_errors)
     resolution_df = pd.DataFrame(
         [{column: row.get(column, "") for column in SOURCE_RESOLUTION_SCHEMA} for row in resolution_df.to_dict("records")],
@@ -101,6 +103,7 @@ def main() -> None:
     outputs = {
         "methodunit_candidates_review.csv": methodunits_df,
         "extracted_source_links_full.csv": links_df,
+        "source_documents.csv": documents_df,
         "extraction_errors.csv": errors_df,
         "source_resolution_results.csv": resolution_df,
     }
