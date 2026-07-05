@@ -79,6 +79,7 @@ Source-specific extractors are small, source-aware ingestion routines — not on
 - **International Carbon Registry / ICR** — discovery-only; M-ICR codes and detail URLs found, but titles require manual review.
 - **Asia Carbon Institute** — source-access / SSL exception handling; not bypassed by default.
 - **City Forest Credits** — document / protocol-family extraction; linked PDFs are discovered but not fully parsed.
+- **Climate Forward** — forecast-methodology table parser with per-methodology detail-page follow-through; captures title, version, date issued, development status, detail URL and primary PDF for each forecast methodology, and preserves per-methodology supporting PDFs (public comments, summaries, errata) plus program-level document links (screening form, template, agreement, approval manual) as supporting documents. First connector implemented from the research → verification → connector workflow.
 
 Other programmes appear in Home, Programme Intelligence, and Connector Roadmap views but do not yet have implemented extractors.
 

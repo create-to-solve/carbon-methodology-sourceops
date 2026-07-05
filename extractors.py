@@ -25,6 +25,7 @@ from pipeline import (
     SUPPORTING_DOCUMENT_TERMS,
     DEVELOPMENT_PAGE_TERMS,
     GENERIC_NAV_TERMS,
+    append_note,
     apply_candidate_classification,
     apply_output_safeguards,
     clean_url,
@@ -944,6 +945,266 @@ def extract_cfc_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = Fa
             candidates[-1]["classification_reason"] = "City Forest Credits supporting or non-protocol link."
 
     return dedupe_candidates(candidates), "", metrics
+
+
+CF_INDEX_METHODOLOGY_HEADERS = ("methodology",)
+CF_INDEX_VERSION_HEADERS = ("current version", "version")
+CF_INDEX_DATE_HEADERS = ("date issued", "date")
+CF_INDEX_STATUS_HEADERS = ("development status", "status")
+CF_INDEX_DOCUMENT_HEADERS = ("document",)
+
+
+def find_table_by_headers(soup, required_headers: tuple[str, ...]):
+    """Return the first <table> whose first row contains all required headers."""
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if not rows:
+            continue
+        header_cells = rows[0].find_all(["th", "td"])
+        header_text = " | ".join(
+            normalize_text(cell.get_text(" ", strip=True)).lower() for cell in header_cells
+        )
+        if all(term in header_text for term in required_headers):
+            return table
+    return None
+
+
+def parse_cf_methodology_row(row) -> dict:
+    """Extract the (title, version, date, status, detail_url) tuple from a Climate Forward index row."""
+    cells = row.find_all(["td", "th"])
+    if len(cells) < 4:
+        return {}
+    title = normalize_text(cells[0].get_text(" ", strip=True))
+    version = normalize_text(cells[1].get_text(" ", strip=True))
+    date_issued = normalize_text(cells[2].get_text(" ", strip=True))
+    status = normalize_text(cells[3].get_text(" ", strip=True))
+    detail_url = ""
+    for anchor in row.find_all("a", href=True):
+        href = anchor.get("href", "").strip()
+        if href and "climateforward.org" in href.lower() and "/methodolog" in href.lower():
+            detail_url = href.rstrip("/") + "/"
+            break
+    return {
+        "title": title,
+        "version": version,
+        "date_issued": date_issued,
+        "status": status,
+        "detail_url": detail_url,
+    }
+
+
+def cf_pdf_matches_methodology(text: str, href: str, title: str) -> bool:
+    """Guess whether a detail-page PDF anchor is the primary methodology document.
+
+    Climate Forward detail pages usually list the methodology PDF first, with a
+    link text like "Dairy Digester Forecast Methodology v1.0". We accept anchors
+    that share tokens with the title and that mention "methodology" — falling
+    back to filename tokens if the link text is bare.
+    """
+    combined = normalize_text(f"{text} {href}").lower()
+    if "methodology" not in combined and "protocol" not in combined:
+        return False
+    title_tokens = [t for t in re.split(r"[^a-z0-9]+", title.lower()) if len(t) > 3]
+    if not title_tokens:
+        return False
+    return any(token in combined for token in title_tokens)
+
+
+def collect_cf_detail_pdfs(profile: dict, methodology: dict, response, source_url: str,
+                            metrics: dict) -> tuple[str, list[dict], list[dict]]:
+    """Fetch a Climate Forward detail page and split its PDFs into (primary, supporting, errors)."""
+    detail_pdfs: list = []
+    soup = BeautifulSoup(response.text, "html.parser")
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href", "").strip()
+        if not href.lower().endswith(".pdf"):
+            continue
+        text = normalize_text(anchor.get_text(" ", strip=True))
+        absolute = urljoin(response.url, href)
+        detail_pdfs.append((text, absolute))
+
+    primary_url = ""
+    supporting = []
+    errors: list[dict] = []
+    seen_urls: set[str] = set()
+    title = methodology["title"]
+    for text, url in detail_pdfs:
+        key = url.lower()
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        if not primary_url and cf_pdf_matches_methodology(text, url, title):
+            primary_url = url
+            continue
+        supporting.append(
+            make_candidate(
+                profile,
+                "",
+                text or url,
+                "supporting_document",
+                "",
+                methodology.get("version", ""),
+                "",
+                methodology.get("detail_url") or response.url,
+                url,
+                "cf_detail_pdf",
+                "medium",
+                f"Supporting PDF discovered on the Climate Forward detail page for '{title}'; body not parsed.",
+            )
+        )
+        supporting[-1]["candidate_type"] = "supporting_document"
+        supporting[-1]["classification_reason"] = "Climate Forward detail-page supporting document link."
+        metrics["cf_supporting_documents"] += 1
+
+    if not primary_url:
+        errors.append(
+            make_extraction_error(
+                profile.get("program_name", "Climate Forward"),
+                methodology.get("detail_url") or source_url,
+                "document_link_missing",
+                f"No primary methodology PDF was identified on the detail page for '{title}'.",
+                "Open the detail page and confirm a stable methodology PDF URL before catalogue ingestion.",
+            )
+        )
+    return primary_url, supporting, errors
+
+
+def extract_climate_forward_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = False) -> tuple[list[dict], list[dict], dict[str, int]]:
+    """Extract forecast-methodology records from the Climate Forward program page.
+
+    Reads the "Methodologies" table on the public index for title, version,
+    date issued, development status, and detail URL. Follows each detail page
+    to capture the primary methodology PDF (as ``document_url``) and any
+    supporting PDFs. Also captures the four program-level document links
+    (screening form, template, agreement, approval manual) as supporting
+    documents. Detail-page follow-through is best-effort: a failed fetch
+    produces an error record but does not drop the methodology candidate.
+    """
+    profile = get_program_profile(profiles, ["Climate Forward"])
+    metrics = {
+        "cf_records_found": 0,
+        "cf_detail_pages_fetched": 0,
+        "cf_detail_pages_failed": 0,
+        "cf_pdf_links_attached": 0,
+        "cf_supporting_documents": 0,
+    }
+    errors: list[dict] = []
+    source_url = profile_source_url(profile)
+    response, error = fetch_public_source(source_url, "Climate Forward", allow_insecure_ssl)
+    if error:
+        errors.append(error)
+        return [], errors, metrics
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    methodology_table = find_table_by_headers(soup, CF_INDEX_METHODOLOGY_HEADERS + CF_INDEX_VERSION_HEADERS[:1])
+    if methodology_table is None:
+        errors.append(
+            make_extraction_error(
+                "Climate Forward",
+                response.url,
+                "page_structure_changed",
+                "Climate Forward methodologies page no longer contains the expected 'Methodology / Current Version' table.",
+                "Open the source page manually and update the extractor's table selector.",
+            )
+        )
+        return [], errors, metrics
+
+    candidates: list[dict] = []
+    seen_dedupe_keys: set[tuple[str, str, str]] = set()
+    rows = methodology_table.find_all("tr")
+    for row in rows[1:]:
+        methodology = parse_cf_methodology_row(row)
+        if not methodology or not methodology["title"]:
+            continue
+        key = (
+            methodology["title"].lower(),
+            methodology["version"].lower(),
+            methodology["detail_url"].lower(),
+        )
+        if key in seen_dedupe_keys:
+            continue
+        seen_dedupe_keys.add(key)
+
+        document_url = ""
+        notes = (
+            "Extracted from the Climate Forward forecast methodologies index; "
+            "linked PDFs are captured but not fully parsed."
+        )
+        if methodology["detail_url"]:
+            detail_response, detail_error = fetch_public_source(
+                methodology["detail_url"], "Climate Forward", allow_insecure_ssl
+            )
+            if detail_error:
+                metrics["cf_detail_pages_failed"] += 1
+                errors.append(detail_error)
+                notes += " Detail page fetch failed; no methodology PDF attached."
+            else:
+                metrics["cf_detail_pages_fetched"] += 1
+                document_url, supporting, detail_errors = collect_cf_detail_pdfs(
+                    profile, methodology, detail_response, response.url, metrics
+                )
+                candidates.extend(supporting)
+                errors.extend(detail_errors)
+                if document_url:
+                    metrics["cf_pdf_links_attached"] += 1
+
+        confidence = "high" if document_url and methodology["version"] else "medium"
+        candidate = make_candidate(
+            profile,
+            "",
+            methodology["title"],
+            "forecast_methodology",
+            "",
+            methodology["version"],
+            methodology["status"] or "Available",
+            response.url,
+            document_url,
+            "cf_index_table_parse",
+            confidence,
+            append_note(notes, f"Date issued: {methodology['date_issued']}") if methodology["date_issued"] else notes,
+        )
+        candidate["candidate_type"] = "methodunit_candidate"
+        candidate["classification_reason"] = "Climate Forward forecast methodology index row."
+        candidates.append(candidate)
+        metrics["cf_records_found"] += 1
+
+    documents_table = find_table_by_headers(soup, CF_INDEX_DOCUMENT_HEADERS)
+    if documents_table is not None:
+        for row in documents_table.find_all("tr")[1:]:
+            cells = row.find_all(["td", "th"])
+            if len(cells) < 2:
+                continue
+            title = normalize_text(cells[0].get_text(" ", strip=True))
+            description = normalize_text(cells[1].get_text(" ", strip=True))
+            document_url = ""
+            for anchor in row.find_all("a", href=True):
+                href = anchor.get("href", "").strip()
+                if href:
+                    document_url = urljoin(response.url, href)
+                    break
+            if not title or not document_url:
+                continue
+            supporting = make_candidate(
+                profile,
+                "",
+                title,
+                "program_document",
+                "",
+                "",
+                "",
+                response.url,
+                document_url,
+                "cf_index_document_table",
+                "medium",
+                f"Climate Forward program-level document: {description[:180]}",
+            )
+            supporting["candidate_type"] = "supporting_document"
+            supporting["classification_reason"] = "Climate Forward program-level document table row."
+            candidates.append(supporting)
+            metrics["cf_supporting_documents"] += 1
+
+    return dedupe_candidates(candidates), errors, metrics
 
 
 def first_url_from_text(value: str) -> str:

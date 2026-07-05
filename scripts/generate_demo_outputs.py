@@ -10,6 +10,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from extractors import (  # noqa: E402
     extract_cfc_candidates,
     extract_climate_action_reserve_candidates,
+    extract_climate_forward_candidates,
     resolve_artisan_c_sink_source,
 )
 from pipeline import (  # noqa: E402
@@ -64,6 +65,7 @@ def main() -> None:
     for source_name, extractor in [
         ("Climate Action Reserve", extract_climate_action_reserve_candidates),
         ("City Forest Credits", extract_cfc_candidates),
+        ("Climate Forward", extract_climate_forward_candidates),
     ]:
         candidates, errors, _metrics = normalize_result(extractor(profiles, allow_insecure_ssl=False))
         all_candidates.extend(candidates)

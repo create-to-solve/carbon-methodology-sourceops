@@ -204,6 +204,7 @@ SUPPORTED_EXTRACTORS = [
     "International Carbon Registry / ICR",
     "Asia Carbon Institute",
     "City Forest Credits",
+    "Climate Forward",
 ]
 
 LIKELY_LINK_TERMS = (
@@ -1569,6 +1570,7 @@ def run_candidate_extractors(
         extract_icr_candidates,
         extract_asia_carbon_institute_candidates,
         extract_cfc_candidates,
+        extract_climate_forward_candidates,
     )
 
     extractor_map = {
@@ -1576,6 +1578,7 @@ def run_candidate_extractors(
         "International Carbon Registry / ICR": extract_icr_candidates,
         "Asia Carbon Institute": extract_asia_carbon_institute_candidates,
         "City Forest Credits": extract_cfc_candidates,
+        "Climate Forward": extract_climate_forward_candidates,
     }
     all_candidates = []
     errors = []
@@ -1591,6 +1594,11 @@ def run_candidate_extractors(
         "cfc_supporting_links_found": 0,
         "cfc_records_missing_version": 0,
         "cfc_fetch_failures": 0,
+        "cf_records_found": 0,
+        "cf_detail_pages_fetched": 0,
+        "cf_detail_pages_failed": 0,
+        "cf_pdf_links_attached": 0,
+        "cf_supporting_documents": 0,
     }
     for extractor_name in selected_extractors:
         extractor = extractor_map.get(extractor_name)
