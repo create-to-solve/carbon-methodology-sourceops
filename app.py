@@ -976,7 +976,7 @@ def programme_intelligence_page(data: dict[str, pd.DataFrame]) -> None:
             break
     selected_programme = st.selectbox("Programme", programmes, index=default_index, key="programme_intelligence_select")
     st.caption(
-        "Try these examples: **American Carbon Registry (ACR)**, **Climate Forward**, **Social Carbon**, **Plan Vivo**, **BioCarbon Registry**, **Artisan C-sink**."
+        "Try these examples: **American Carbon Registry (ACR)**, **Climate Forward**, **Social Carbon**, **Plan Vivo**, **BioCarbon Registry**, **Puro Earth**, **Artisan C-sink**."
     )
 
     profiles = data.get("source_profiles", pd.DataFrame())
@@ -2437,6 +2437,7 @@ def explore_source_page(data: dict[str, pd.DataFrame]) -> None:
         st.write("- **Social Carbon** — coded detail pages + version history.")
         st.write("- **Plan Vivo** — compact approved-methodology cards (PM001/PM002).")
         st.write("- **BioCarbon Registry / BCR** — AFOLU card scanner with native + adopted-external (CDM) methodologies.")
+        st.write("- **Puro Earth** — landing page + document library with HubSpot-hosted PDFs and evidence-stage tagging.")
         st.write("- **Artisan C-sink** — source-resolution case (no clean methodology page).")
 
     default_source_context = {

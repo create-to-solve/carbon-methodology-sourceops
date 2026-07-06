@@ -225,7 +225,7 @@ Aggregated CSV row counts:
 ## Next Development Priorities
 
 1. Repair or confirm remaining stale source-registry URLs before building more extractors.
-2. Follow the Connector Roadmap → "Next to Build" list — Cercarbono, Puro Earth, ART/TREES, Isometric, Credible Carbon are the researched candidates whose extractors are not yet implemented.
+2. Follow the Connector Roadmap → "Next to Build" list — ART/TREES, Isometric, Credible Carbon are the researched candidates whose extractors are not yet implemented.
 3. Add controlled PDF metadata extraction for document-first sources.
 4. Prototype a bounded AI-assist step for one messy case (for example, ICR title suggestions from detail-page text).
 5. Add catalogue import validation once the extracted-record and review-decision schemas stabilize.
