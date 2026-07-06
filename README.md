@@ -89,7 +89,7 @@ The app currently ships **nine** working source-specific extractors plus **one**
 
 Plus one source-resolution routine:
 
-- **Artisan C-sink** — no clean methodology index; the routine captures a document-family record, preserves clarification documents, and logs missing/unstable document links as issues. Selectable from the Source Explorer dropdown alongside the eight extractors.
+- **Artisan C-sink** — no clean methodology index; the routine captures a document-family record, preserves clarification documents, and logs missing/unstable document links as issues. Selectable from the Source Explorer dropdown alongside the nine extractors.
 
 Other programmes appear in Home, Programme Intelligence, and Connector Roadmap views but do not yet have implemented extractors — the researched candidates awaiting a connector are listed under Connector Roadmap → "Next to Build" (Cercarbono, Puro Earth, ART/TREES, Isometric, Credible Carbon).
 
@@ -221,7 +221,7 @@ Aggregated CSV row counts:
 ## Next Development Priorities
 
 1. Repair or confirm remaining stale source-registry URLs before building more extractors.
-2. Follow the Connector Roadmap → "Next to Build" list — Cercarbono, Puro Earth, BioCarbon Registry, ART/TREES, Isometric, Credible Carbon are the researched candidates whose extractors are not yet implemented.
+2. Follow the Connector Roadmap → "Next to Build" list — Cercarbono, Puro Earth, ART/TREES, Isometric, Credible Carbon are the researched candidates whose extractors are not yet implemented.
 3. Add controlled PDF metadata extraction for document-first sources.
 4. Prototype a bounded AI-assist step for one messy case (for example, ICR title suggestions from detail-page text).
 5. Add catalogue import validation once the extracted-record and review-decision schemas stabilize.
