@@ -208,6 +208,7 @@ SUPPORTED_EXTRACTORS = [
     "American Carbon Registry / ACR",
     "Social Carbon",
     "Plan Vivo",
+    "BioCarbon Registry / BCR",
 ]
 
 SOURCE_RESOLUTION_SOURCES = [
@@ -1581,6 +1582,7 @@ def run_candidate_extractors(
         extract_acr_candidates,
         extract_social_carbon_candidates,
         extract_plan_vivo_candidates,
+        extract_biocarbon_registry_candidates,
     )
 
     extractor_map = {
@@ -1592,6 +1594,7 @@ def run_candidate_extractors(
         "American Carbon Registry / ACR": extract_acr_candidates,
         "Social Carbon": extract_social_carbon_candidates,
         "Plan Vivo": extract_plan_vivo_candidates,
+        "BioCarbon Registry / BCR": extract_biocarbon_registry_candidates,
     }
     all_candidates = []
     errors = []
@@ -1632,6 +1635,12 @@ def run_candidate_extractors(
         "pv_primary_pdf_missing": 0,
         "pv_assessment_reports_captured": 0,
         "pv_supporting_documents": 0,
+        "bcr_records_found": 0,
+        "bcr_adopted_external_records": 0,
+        "bcr_primary_pdf_attached": 0,
+        "bcr_primary_pdf_missing": 0,
+        "bcr_supporting_documents": 0,
+        "bcr_previous_version_bundles": 0,
     }
     for extractor_name in selected_extractors:
         extractor = extractor_map.get(extractor_name)

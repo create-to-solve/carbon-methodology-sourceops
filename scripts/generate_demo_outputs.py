@@ -9,6 +9,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from extractors import (  # noqa: E402
     extract_acr_candidates,
+    extract_biocarbon_registry_candidates,
     extract_cfc_candidates,
     extract_climate_action_reserve_candidates,
     extract_climate_forward_candidates,
@@ -72,6 +73,7 @@ def main() -> None:
         ("American Carbon Registry (ACR)", extract_acr_candidates),
         ("Social Carbon", extract_social_carbon_candidates),
         ("Plan Vivo", extract_plan_vivo_candidates),
+        ("BioCarbon Registry", extract_biocarbon_registry_candidates),
     ]:
         candidates, errors, _metrics = normalize_result(extractor(profiles, allow_insecure_ssl=False))
         all_candidates.extend(candidates)

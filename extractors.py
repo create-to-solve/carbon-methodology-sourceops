@@ -2138,6 +2138,257 @@ def extract_plan_vivo_candidates(profiles: pd.DataFrame, allow_insecure_ssl: boo
     return dedupe_candidates(candidates), errors, metrics
 
 
+BIOCARBON_CANONICAL_SOURCE_URL = "https://biocarbonstandard.com/en/afolu/"
+BIOCARBON_CODE_RE = re.compile(r"\bBCR\d{4}\b")
+BIOCARBON_DOCUMENT_EXTENSIONS = (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".zip")
+BIOCARBON_ADOPTED_CODE_RE = re.compile(r"\b(?:AR-AMS[-\s]?[A-Z0-9.]+|AR-AM\d{4}|ACM\d{4}|AM\d{4}|AMS[-\s][A-Z0-9.]+)\b")
+BIOCARBON_PRIMARY_ANCHOR_TEXTS = ("methodological document",)
+
+
+def biocarbon_source_url(profile: dict) -> str:
+    candidate = profile_source_url(profile)
+    if candidate and "biocarbonstandard.com" in candidate.lower() and "/afolu" in candidate.lower():
+        return candidate
+    return BIOCARBON_CANONICAL_SOURCE_URL
+
+
+def biocarbon_is_document_href(href: str) -> bool:
+    href_l = (href or "").split("?", 1)[0].split("#", 1)[0].lower()
+    return href_l.endswith(BIOCARBON_DOCUMENT_EXTENSIONS)
+
+
+def find_biocarbon_card_container(node):
+    """Walk up from an H3 until an ancestor also contains document anchors.
+
+    BioCarbon Registry uses nested Elementor row containers; the H3 for a card
+    sits in one column widget while the PDF anchors sit in a sibling widget.
+    The lowest ancestor that carries any document anchor is the card wrapper.
+    """
+    current = node
+    for _ in range(8):
+        if current.parent is None:
+            return current
+        current = current.parent
+        for anchor in current.find_all("a", href=True):
+            if biocarbon_is_document_href(anchor.get("href", "")):
+                return current
+    return current
+
+
+def classify_biocarbon_anchor(text: str, href: str) -> str:
+    text_l = (text or "").strip().lower()
+    href_l = (href or "").lower()
+    if any(marker in text_l for marker in BIOCARBON_PRIMARY_ANCHOR_TEXTS):
+        return "primary"
+    if "public consultation" in text_l:
+        return "public_consultation"
+    if "previous versions" in text_l or "previous-versions" in href_l or "previous_versions" in href_l:
+        return "previous_versions"
+    if "guideline" in text_l or "directrices" in href_l:
+        return "guideline"
+    return "supporting"
+
+
+def parse_biocarbon_heading(heading_text: str) -> tuple[str, str, str]:
+    """Return (code, title, adopted_code) parsed from a BioCarbon card heading."""
+    text = normalize_text(heading_text)
+    bcr_match = BIOCARBON_CODE_RE.search(text)
+    adopted_match = BIOCARBON_ADOPTED_CODE_RE.search(text)
+    code = bcr_match.group(0) if bcr_match else ""
+    adopted_code = adopted_match.group(0) if adopted_match else ""
+    title = text
+    if code:
+        title = normalize_text(text[bcr_match.end():])
+    return code, title, adopted_code
+
+
+def collect_biocarbon_documents(profile: dict, code: str, title: str, source_url: str,
+                                 container, is_adopted_external: bool, metrics: dict) -> tuple[str, str, list[dict], list[dict]]:
+    """Return (primary_url, adopted_code_from_docs, supporting[], errors[]) for one card."""
+    primary_url = ""
+    adopted_code_from_docs = ""
+    supporting: list[dict] = []
+    errors: list[dict] = []
+    seen_urls: set[str] = set()
+    for anchor in container.find_all("a", href=True):
+        href = anchor.get("href", "").strip()
+        if not href or not biocarbon_is_document_href(href):
+            continue
+        absolute = urljoin(source_url, href)
+        text = normalize_text(anchor.get_text(" ", strip=True)) or absolute
+        stage = classify_biocarbon_anchor(text, href)
+        if stage == "primary":
+            if not primary_url:
+                primary_url = absolute
+                seen_urls.add(absolute.lower())
+                # Adopted-external sections have no BCR code; pull it from the PDF filename.
+                if is_adopted_external:
+                    external_match = BIOCARBON_ADOPTED_CODE_RE.search(href)
+                    if external_match:
+                        adopted_code_from_docs = external_match.group(0)
+                continue
+        key = absolute.lower()
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        candidate = make_candidate(
+            profile,
+            code,
+            text,
+            "supporting_document",
+            "",
+            "",
+            "",
+            source_url,
+            absolute,
+            "biocarbon_index_document",
+            "medium",
+            f"BioCarbon Registry supporting document for {code or 'adopted external'} "
+            f"'{title}' (stage: {stage}); body not parsed.",
+        )
+        candidate["candidate_type"] = "supporting_document"
+        candidate["classification_reason"] = f"BioCarbon Registry AFOLU card document ({stage})."
+        candidate["notes"] = append_note(candidate["notes"], f"evidence_stage: {stage}")
+        supporting.append(candidate)
+        metrics["bcr_supporting_documents"] += 1
+        if stage == "previous_versions":
+            metrics["bcr_previous_version_bundles"] += 1
+
+    if not primary_url:
+        errors.append(
+            make_extraction_error(
+                profile.get("program_name", "BioCarbon Registry"),
+                source_url,
+                "document_link_missing",
+                f"No primary 'Methodological Document' PDF was identified for '{code or title}' on the BioCarbon AFOLU page.",
+                "Open the source page and confirm which anchor represents the current methodology PDF.",
+            )
+        )
+        metrics["bcr_primary_pdf_missing"] += 1
+    return primary_url, adopted_code_from_docs, supporting, errors
+
+
+def extract_biocarbon_registry_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = False) -> tuple[list[dict], list[dict], dict[str, int]]:
+    """Extract methodology records from the BioCarbon Registry AFOLU page.
+
+    Each methodology is laid out as an Elementor "row" that pairs an image-box
+    widget (H3 with the ``BCR####`` code + title) with a button-widget column
+    holding one or more document anchors ("Methodological Document",
+    "Public Consultation Results", "Previous Versions", occasional
+    "Guidelines…" links). A sibling "Coastal Ecosystems" card carries no BCR
+    code and links to an adopted CDM methodology (``AR-AM0014``); that card is
+    captured with ``unit_type = "adopted_external_method"`` and the CDM code
+    extracted from the PDF filename.
+
+    Version and status are not published on this page; both fields are left
+    blank and reviewers are expected to open the PDF for that detail. Sector
+    is derived from the H1 ("AFOLU Sector") and stored in ``notes`` with a
+    label.
+    """
+    profile = get_program_profile(profiles, ["BioCarbon Registry", "BioCarbon Registry (BCR)"])
+    metrics = {
+        "bcr_records_found": 0,
+        "bcr_adopted_external_records": 0,
+        "bcr_primary_pdf_attached": 0,
+        "bcr_primary_pdf_missing": 0,
+        "bcr_supporting_documents": 0,
+        "bcr_previous_version_bundles": 0,
+    }
+    errors: list[dict] = []
+    source_url = biocarbon_source_url(profile)
+    response, error = fetch_public_source(source_url, "BioCarbon Registry", allow_insecure_ssl)
+    if error:
+        errors.append(error)
+        return [], errors, metrics
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    sector_label = ""
+    h1 = soup.find("h1")
+    if h1:
+        sector_label = normalize_text(h1.get_text(" ", strip=True))
+
+    all_h3 = soup.find_all("h3")
+    bcr_headings = []
+    for heading in all_h3:
+        code, title, _ = parse_biocarbon_heading(heading.get_text(" ", strip=True))
+        if code:
+            bcr_headings.append((heading, code, title, False))
+        elif title and normalize_text(title).lower() in {"coastal ecosystems"}:
+            bcr_headings.append((heading, "", title, True))
+
+    if not bcr_headings:
+        errors.append(
+            make_extraction_error(
+                "BioCarbon Registry",
+                response.url,
+                "no_records_found" if all_h3 else "page_structure_changed",
+                "BioCarbon Registry AFOLU page did not expose any 'BCR####' methodology headings.",
+                "Open the source page and confirm the AFOLU cards still start with a 'BCR####' H3.",
+            )
+        )
+        return [], errors, metrics
+
+    candidates: list[dict] = []
+    seen_dedupe_keys: set[tuple[str, str]] = set()
+    for heading, code, title, is_adopted_external in bcr_headings:
+        container = find_biocarbon_card_container(heading)
+        primary_url, adopted_code_from_docs, supporting, doc_errors = collect_biocarbon_documents(
+            profile, code, title, response.url, container, is_adopted_external, metrics
+        )
+        errors.extend(doc_errors)
+        candidates.extend(supporting)
+
+        effective_code = code or adopted_code_from_docs
+        dedupe_key = (effective_code.lower(), primary_url.lower())
+        if dedupe_key in seen_dedupe_keys and effective_code:
+            continue
+        seen_dedupe_keys.add(dedupe_key)
+
+        rich_notes = (
+            "Extracted from the BioCarbon Registry AFOLU page; linked PDFs are captured but not fully parsed."
+        )
+        if sector_label:
+            rich_notes = append_note(rich_notes, f"sector: {sector_label}")
+        if is_adopted_external:
+            rich_notes = append_note(
+                rich_notes,
+                "adopted_external_methodology: this card links to an external methodology (e.g. CDM) rather than a native BCR PDF.",
+            )
+            if adopted_code_from_docs:
+                rich_notes = append_note(rich_notes, f"adopted_external_code: {adopted_code_from_docs}")
+            metrics["bcr_adopted_external_records"] += 1
+
+        if primary_url:
+            metrics["bcr_primary_pdf_attached"] += 1
+
+        unit_type = "adopted_external_method" if is_adopted_external else "methodology"
+        confidence = "high" if primary_url and effective_code else "medium"
+        candidate = make_candidate(
+            profile,
+            effective_code,
+            title or f"{effective_code} (title requires review)",
+            unit_type,
+            "",
+            "",
+            "",
+            response.url,
+            primary_url,
+            "biocarbon_afolu_card_scan",
+            confidence,
+            rich_notes,
+        )
+        candidate["candidate_type"] = "methodunit_candidate"
+        candidate["classification_reason"] = (
+            f"BioCarbon Registry adopted-external card ({adopted_code_from_docs or 'no code'})."
+            if is_adopted_external
+            else f"BioCarbon Registry AFOLU methodology card ({code})."
+        )
+        candidates.append(candidate)
+        metrics["bcr_records_found"] += 1
+
+    return dedupe_candidates(candidates), errors, metrics
+
+
 def first_url_from_text(value: str) -> str:
     match = re.search(r"https?://[^\s,\"']+", str(value or ""))
     return clean_url(match.group(0)) if match else ""
