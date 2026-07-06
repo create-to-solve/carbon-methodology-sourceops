@@ -160,6 +160,35 @@ SOURCE_PROFILES = {
     },
 }
 
+PUBLIC_EXTRACTOR_ALIASES = {
+    "Climate Action Reserve": ["Climate Action Reserve"],
+    "International Carbon Registry / ICR": [
+        "International Carbon Registry / ICR",
+        "International Carbon Registry (ICR)",
+        "International Carbon Registry",
+        "ICR",
+    ],
+    "Asia Carbon Institute": ["Asia Carbon Institute"],
+    "City Forest Credits": ["City Forest Credits"],
+    "Climate Forward": ["Climate Forward"],
+    "American Carbon Registry / ACR": [
+        "American Carbon Registry / ACR",
+        "American Carbon Registry (ACR)",
+        "American Carbon Registry",
+        "ACR",
+    ],
+    "Social Carbon": ["Social Carbon"],
+    "Plan Vivo": ["Plan Vivo"],
+    "BioCarbon Registry / BCR": [
+        "BioCarbon Registry / BCR",
+        "BioCarbon Registry",
+        "BCR",
+    ],
+    "Cercarbono": ["Cercarbono"],
+    "Puro Earth": ["Puro Earth"],
+    "ART/TREES": ["ART/TREES"],
+}
+
 RECOMMENDED_SOURCE_CHECK_PRESETS = [
     "Climate Action Reserve",
     "International Carbon Registry (ICR)",
@@ -243,16 +272,53 @@ def load_demo_csv(file_name: str, columns: list[str]) -> pd.DataFrame:
         return pd.DataFrame(columns=columns)
 
 
+def source_alias_keys(source: str) -> set[str]:
+    aliases = PUBLIC_EXTRACTOR_ALIASES.get(source, [source])
+    return {programme_key(alias) for alias in aliases if normalize_text(alias)}
+
+
+def source_matches(row_source: str, selected_source: str) -> bool:
+    return programme_key(row_source) in source_alias_keys(selected_source)
+
+
+def records_for_source(records: pd.DataFrame, source: str) -> pd.DataFrame:
+    if records.empty or "program_name" not in records.columns:
+        return pd.DataFrame(columns=records.columns)
+    return records[records["program_name"].astype(str).apply(lambda value: source_matches(value, source))].copy()
+
+
+def store_extraction_results(
+    candidates: pd.DataFrame,
+    errors: pd.DataFrame,
+    enrichment_metrics: dict,
+    result_mode: str,
+    source: str,
+    sources_attempted: int = 1,
+) -> None:
+    prepared_candidates = apply_output_safeguards(ensure_columns(candidates, CANDIDATE_SCHEMA))
+    prepared_errors = ensure_columns(errors, EXTRACTION_ERROR_SCHEMA)
+    st.session_state["candidate_extraction_results"] = prepared_candidates
+    st.session_state["candidate_extraction_errors"] = prepared_errors
+    st.session_state["candidate_extraction_enrichment_metrics"] = enrichment_metrics
+    st.session_state["candidate_extraction_sources_attempted"] = sources_attempted
+    st.session_state["source_resolution_last_run"] = ""
+    st.session_state["extract_result_mode"] = result_mode
+    st.session_state["extract_result_source"] = source
+    st.session_state["demo_source_last_run"] = source if result_mode == "live" else "Demo extraction package"
+
+
 def load_demo_extraction_into_session() -> None:
     candidates = load_demo_csv("extracted_source_links_full.csv", CANDIDATE_SCHEMA)
     methodunits = load_demo_csv("methodunit_candidates_review.csv", CANDIDATE_SCHEMA)
     errors = load_demo_csv("extraction_errors.csv", EXTRACTION_ERROR_SCHEMA)
-    st.session_state["candidate_extraction_results"] = candidates if not candidates.empty else methodunits
-    st.session_state["candidate_extraction_errors"] = errors
-    st.session_state["candidate_extraction_enrichment_metrics"] = {}
-    st.session_state["candidate_extraction_sources_attempted"] = len(PUBLIC_EXTRACTORS)
-    st.session_state["source_resolution_last_run"] = ""
-    st.session_state["demo_source_last_run"] = "Demo extraction package"
+    store_extraction_results(
+        candidates if not candidates.empty else methodunits,
+        errors,
+        {},
+        "demo",
+        "Demo extraction package",
+        sources_attempted=len(PUBLIC_EXTRACTORS),
+    )
     st.session_state["source_exploration_summary"] = {
         "Source": "Demo extraction package",
         "Source status": "loaded",
@@ -3118,7 +3184,7 @@ def method_about_page(data: dict[str, pd.DataFrame]) -> None:
 
 def extract_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Extract")
-    st.write("Choose a source, inspect its publishing pattern, then load demo records or run the selected extractor.")
+    st.write("Choose a source, inspect its publishing pattern, then view demo records or run the live extractor.")
 
     source = st.selectbox("Carbon standard / registry", PUBLIC_EXTRACTORS, key="extract_source_select")
     profile = SOURCE_PROFILES.get(source, {})
@@ -3137,71 +3203,88 @@ def extract_page(data: dict[str, pd.DataFrame]) -> None:
     if profile.get("url"):
         st.link_button("Open primary source", profile["url"])
 
-    action_col_0, action_col_1 = st.columns([1, 1])
+    action_col_0, action_col_1 = st.columns(2, gap="small")
     with action_col_0:
-        if st.button("Load demo extraction", type="primary", key="extract_load_demo"):
+        if st.button("View demo records", type="primary", key="extract_load_demo", use_container_width=True):
             load_demo_extraction_into_session()
-            st.success("Loaded the demo extraction package.")
     with action_col_1:
-        if st.button("Run extraction", key="extract_run_selected"):
+        if st.button("Run live extraction", key="extract_run_selected", use_container_width=True):
             with st.spinner(f"Running extractor for {source}..."):
                 candidates_df, errors_df, enrichment_metrics = run_candidate_extractors(
                     [source],
                     data.get("source_profiles", pd.DataFrame()),
                 )
-            st.session_state["candidate_extraction_results"] = candidates_df
-            st.session_state["candidate_extraction_errors"] = errors_df
-            st.session_state["candidate_extraction_enrichment_metrics"] = enrichment_metrics
-            st.session_state["candidate_extraction_sources_attempted"] = 1
-            st.session_state["source_resolution_last_run"] = ""
-            st.session_state["demo_source_last_run"] = source
-            st.success(f"Extraction finished for {source}.")
+            store_extraction_results(candidates_df, errors_df, enrichment_metrics, "live", source)
 
     records, records_source = records_for_workbench()
-    filtered_records = records[records.get("program_name", pd.Series("", index=records.index)).astype(str).eq(source)].copy()
+    links, _links_source = links_for_workbench()
+    errors, _errors_source = errors_for_workbench()
+    filtered_records = records_for_source(records, source)
+    selected_links = records_for_source(links, source)
+    selected_errors = records_for_source(errors, source)
+    result_mode = st.session_state.get("extract_result_mode", "")
+    result_source = st.session_state.get("extract_result_source", "")
 
     st.subheader("Extracted Records")
-    st.caption(f"Current record source: {records_source}")
+    if records.empty:
+        st.info("No records loaded yet. Choose a source and view demo records or run live extraction.")
+    elif result_mode == "demo":
+        if filtered_records.empty:
+            st.info("The demo package does not include records for this source.")
+        else:
+            st.success(f"Showing demo records for {source}")
+    elif result_mode == "live" and source_matches(result_source, source):
+        if filtered_records.empty:
+            st.info("Extraction completed, but no methodology/document records were found for this source.")
+        else:
+            st.success(f"Showing live extraction results for {source}")
+    elif result_mode == "live":
+        st.info("No records loaded yet. Choose a source and view demo records or run live extraction.")
+    elif records_source != "none":
+        if filtered_records.empty:
+            st.info("No records loaded yet. Choose a source and view demo records or run live extraction.")
+        else:
+            st.success(f"Showing extracted records for {source}")
+
     if filtered_records.empty:
-        st.info("No extracted methodology/document records are loaded for this source yet.")
+        pass
     else:
         st.dataframe(
             workbench_record_table(filtered_records),
             hide_index=True,
             use_container_width=True,
             height=440,
-            column_config={"Primary document URL": st.column_config.LinkColumn("Primary document URL", display_text=None)},
+            column_config={
+                "Source/programme": st.column_config.TextColumn("Source/programme", width="medium"),
+                "Methodology / document title": st.column_config.TextColumn(
+                    "Methodology / document title",
+                    width="large",
+                ),
+                "Version": st.column_config.TextColumn("Version", width="small"),
+                "Status": st.column_config.TextColumn("Status", width="small"),
+                "Unit type": st.column_config.TextColumn("Unit type", width="small"),
+                "Primary document URL": st.column_config.LinkColumn(
+                    "Primary document URL",
+                    display_text="Open",
+                    width="small",
+                ),
+                "Review status": st.column_config.TextColumn("Review status", width="small"),
+            },
         )
 
     with st.expander("Advanced extraction details", expanded=False):
-        links, links_source = links_for_workbench()
-        errors, errors_source = errors_for_workbench()
-        selected_links = links[links.get("program_name", pd.Series("", index=links.index)).astype(str).eq(source)].copy()
-        st.caption(f"Links source: {links_source}; errors source: {errors_source}")
         metric_row(
             [
-                ("Records for selected source", len(filtered_records)),
-                ("All source-link rows for selected source", len(selected_links)),
-                ("Extraction errors loaded", len(errors)),
+                ("Extracted record count", len(filtered_records)),
+                ("Evidence/source-link count", len(selected_links)),
+                ("Extraction issue count", len(selected_errors)),
             ]
         )
-        if not errors.empty:
-            show_dataframe(select_existing(errors, EXTRACTION_ERROR_SCHEMA), "extract_advanced_errors", height=220)
-        if not selected_links.empty:
+        if not selected_errors.empty:
             show_dataframe(
-                select_existing(
-                    selected_links,
-                    [
-                        "program_name",
-                        "methodunit_name",
-                        "candidate_type",
-                        "document_url",
-                        "source_url",
-                        "classification_reason",
-                    ],
-                ),
-                "extract_advanced_links",
-                height=260,
+                select_existing(selected_errors, EXTRACTION_ERROR_SCHEMA),
+                "extract_advanced_errors",
+                height=220,
             )
 
 
@@ -3212,17 +3295,17 @@ def review_page(data: dict[str, pd.DataFrame]) -> None:
     records, records_source = records_for_workbench()
     links, _links_source = links_for_workbench()
     if records.empty:
-        if st.button("Load demo extraction", type="primary", key="review_load_demo"):
+        if st.button("View demo records", type="primary", key="review_load_demo"):
             load_demo_extraction_into_session()
             st.rerun()
         st.info("Load the demo extraction or run an extractor before reviewing records.")
         return
 
-    source_options = ["All sources"] + [source for source in PUBLIC_EXTRACTORS if source in set(records["program_name"].astype(str))]
+    source_options = ["All sources"] + [source for source in PUBLIC_EXTRACTORS if not records_for_source(records, source).empty]
     selected_source = st.selectbox("Source", source_options, key="review_source_filter")
     filtered = records.copy()
     if selected_source != "All sources":
-        filtered = filtered[filtered["program_name"].astype(str).eq(selected_source)]
+        filtered = records_for_source(filtered, selected_source)
 
     st.caption(f"Review queue source: {records_source}")
     st.dataframe(
