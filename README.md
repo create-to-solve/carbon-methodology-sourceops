@@ -75,7 +75,7 @@ Source-specific extractors are small, source-aware ingestion routines — not on
 
 ## Currently Supported Source-Specific Extractors
 
-The app currently ships **nine** working source-specific extractors plus **one** source-resolution routine (Artisan C-sink) — ten sources total, all reachable from the Source Explorer dropdown:
+The app currently ships **ten** working source-specific extractors plus **one** source-resolution routine (Artisan C-sink) — eleven sources total, all reachable from the Source Explorer dropdown:
 
 - **Climate Action Reserve** — working structured-table extraction.
 - **International Carbon Registry / ICR** — discovery-only; M-ICR codes and detail URLs found, but titles require manual review.
@@ -84,6 +84,7 @@ The app currently ships **nine** working source-specific extractors plus **one**
 - **Climate Forward** — forecast-methodology table parser with per-methodology detail-page follow-through; captures title, version, date issued, development status, detail URL and primary PDF for each forecast methodology, and preserves per-methodology supporting PDFs (public comments, summaries, errata) plus program-level document links (screening form, template, agreement, approval manual) as supporting documents. First connector implemented from the research → verification → connector workflow.
 - **American Carbon Registry (ACR)** — approved-methodology table parser with per-methodology detail-page follow-through; captures ANAB sectoral scope, title, version, detail URL and the current approved PDF (identified via the `Download the methodology` anchor) for each row. Historical PDFs under `Previous Approved Versions` are preserved as supporting documents tagged `evidence_stage: historical_version` and are never attached as the primary document; process-documentation PDFs (peer review, public comments, summaries of changes) and reference documents (ERT calculators, `.xlsx` templates) are captured with appropriate stage tags. Detail-page fetch failures log per-methodology errors without dropping the index row.
 - **Social Carbon** — card-layout index scanner (no `<table>`) that detects each `SCM####:` methodology heading, resolves its `/scm####` detail URL, and follows it. On the detail page the current PDF is identified via the top `View Methodology` anchor; status is parsed from the `Status: Live/Inactive since <date>` line; the `Modules / Key Sources` block and `Version History.` H4 chain are captured into `notes` (labelled `sector:`, `modules:`, `version_history:` — none of these have first-class schema columns). Historical version PDFs, public-comment PDFs, feasibility templates, VVB checklists, and any board/sunset decision documents are captured as supporting documents with evidence-stage tags. Inactive methodologies (currently SCM0001) are still ingested with `status = Inactive since <date>` — reviewers decide whether to keep them.
+- **Cercarbono** — single-page card scanner for the public English methodologies page (no detail pages, no `<table>`). Bounded to the "Explore approved methodologies" H2 section — H4 methodology cards under `Carbon programme`, `Biodiversity programme`, and `Circular economy programme` H3s are emitted as native records with `unit_type = "methodology"`, primary PDF taken from the card's `Download methodology` anchor, and version parsed from the filename (e.g. `V-3.1` → `V3.1`). H4 sector rows under the `CDM methodologies` H3 (Energy, Industry, Construction, Transport, Mining, Metal, Fugitive Emissions, Waste Management, Land Use) are emitted with `unit_type = "adopted_external_method"` and the sector's aggregate `.xlsx` catalogue as `document_url`, with a labelled `adopted_external_methodology` note explaining the catalogue contains multiple CDM methods. Machine codes are not published on the surface — reviewers open the PDF/XLSX for the Cercarbono internal code — so `methodunit_code` is left blank. Uses the verified `https://cercarbono.com/methodologies/` URL exclusively — the `/en/methodologies/` and `/en/metodologias/` paths return 404.
 - **BioCarbon Registry (BCR)** — single-page card scanner for the public AFOLU sector page (no detail pages, no `<table>`). Iterates every `<h3>` matching `BCR####`, walks up the nested Elementor row containers to find the sibling widget holding the card's PDF anchors, and picks the "Methodological Document" anchor as the primary PDF. "Public Consultation Results/Document" PDFs, "Previous Versions" `.zip` bundles, and "Guidelines…" PDFs are captured as supporting documents tagged with matching evidence stages. A sibling "Coastal Ecosystems" card without a BCR code but linking to a CDM `AR-AM0014` PDF is emitted as `unit_type = "adopted_external_method"` with the CDM code extracted from the filename and a labelled `adopted_external_methodology` note. Sector (`AFOLU Sector`) is stored in `notes` since `CANDIDATE_SCHEMA` has no sector column dedicated to the H1 label. Uses the verified `https://biocarbonstandard.com/en/afolu/` URL exclusively — the JS-heavy `biocarbonregistry.com` domain is not consulted.
 - **Plan Vivo** — single-page article scanner for the PV Climate approved-methodologies page (no detail pages, no `<table>`). Iterates leaf `<article>` blocks — skipping the outer wrapper article — to detect each `PM###` methodology, extracting title, description, and a `Status: … Type: … Version …: PM### V… | Assessment Report (Active from: …) Developer: … Reviewers: …` metadata line. The primary PDF is chosen from the S3-hosted `PM### V#.#` / `View PM###` anchors; the paired assessment / review report is captured as a supporting document tagged `evidence_stage: assessment`. Non-schema fields (`type`, `active_from`, `developer`, `reviewers`, `description`) are stored in `notes` with labels. Uses the verified `/projects/certify-a-project/pvclimate/methodologies/approved-methodologies` URL exclusively — the deprecated technical-library path is not consulted.
 
@@ -91,7 +92,7 @@ Plus one source-resolution routine:
 
 - **Artisan C-sink** — no clean methodology index; the routine captures a document-family record, preserves clarification documents, and logs missing/unstable document links as issues. Selectable from the Source Explorer dropdown alongside the nine extractors.
 
-Other programmes appear in Home, Programme Intelligence, and Connector Roadmap views but do not yet have implemented extractors — the researched candidates awaiting a connector are listed under Connector Roadmap → "Next to Build" (Cercarbono, Puro Earth, ART/TREES, Isometric, Credible Carbon).
+Other programmes appear in Home, Programme Intelligence, and Connector Roadmap views but do not yet have implemented extractors — the researched candidates awaiting a connector are listed under Connector Roadmap → "Next to Build" (Puro Earth, ART/TREES, Isometric, Credible Carbon).
 
 ## Source Resolution
 
@@ -197,7 +198,7 @@ The Review Desk -> Exports tab can write timestamped files to `outputs/`, includ
 
 ### Latest Demo Package
 
-`scripts/generate_demo_outputs.py` regenerates `outputs/demo_latest/` from the extractors currently wired to the demo (CAR, City Forest Credits, Climate Forward, ACR, Social Carbon, Plan Vivo, BioCarbon Registry, and the Artisan C-sink source-resolution routine). At the current head, the regenerated demo produces:
+`scripts/generate_demo_outputs.py` regenerates `outputs/demo_latest/` from the extractors currently wired to the demo (CAR, City Forest Credits, Climate Forward, ACR, Social Carbon, Plan Vivo, BioCarbon Registry, Cercarbono, and the Artisan C-sink source-resolution routine). At the current head, the regenerated demo produces:
 
 | Source | Records | Total links | Issues |
 |---|---:|---:|---:|
@@ -208,13 +209,14 @@ The Review Desk -> Exports tab can write timestamped files to `outputs/`, includ
 | Social Carbon | 11 | 63 | 0 |
 | Plan Vivo | 2 | 4 | 0 |
 | BioCarbon Registry | 16 | 47 | 0 |
+| Cercarbono | 17 | 17 | 0 |
 | Artisan C-sink | 1 | 28 | 0 |
 
 Aggregated CSV row counts:
 
-- `methodunit_candidates_review.csv` — **116** rows
-- `extracted_source_links_full.csv` — **602** rows
-- `source_documents.csv` — **575** rows
+- `methodunit_candidates_review.csv` — **133** rows
+- `extracted_source_links_full.csv` — **619** rows
+- `source_documents.csv` — **592** rows
 - `extraction_errors.csv` — **0** rows
 - `source_resolution_results.csv` — 1 row
 

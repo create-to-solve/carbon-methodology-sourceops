@@ -2389,6 +2389,267 @@ def extract_biocarbon_registry_candidates(profiles: pd.DataFrame, allow_insecure
     return dedupe_candidates(candidates), errors, metrics
 
 
+CERCARBONO_CANONICAL_SOURCE_URL = "https://cercarbono.com/methodologies/"
+CERCARBONO_DOCUMENT_EXTENSIONS = (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".zip")
+CERCARBONO_NATIVE_PRIMARY_TEXTS = ("download methodology",)
+CERCARBONO_CDM_PRIMARY_TEXTS = ("download excel", "download xlsx")
+CERCARBONO_NATIVE_PROGRAMMES = (
+    "carbon programme",
+    "biodiversity programme",
+    "circular economy programme",
+)
+CERCARBONO_CDM_PROGRAMMES = ("cdm methodologies",)
+CERCARBONO_SECTION_H2_MARKERS = ("explore approved methodologies",)
+CERCARBONO_VERSION_RE = re.compile(r"V[\s_.\-]?(\d+(?:[\._-]\d+)?)", re.IGNORECASE)
+
+
+def cercarbono_source_url(profile: dict) -> str:
+    candidate = profile_source_url(profile)
+    if candidate and "cercarbono.com" in candidate.lower() and "methodolog" in candidate.lower():
+        return candidate
+    return CERCARBONO_CANONICAL_SOURCE_URL
+
+
+def cercarbono_is_document_href(href: str) -> bool:
+    href_l = (href or "").split("?", 1)[0].split("#", 1)[0].lower()
+    return href_l.endswith(CERCARBONO_DOCUMENT_EXTENSIONS)
+
+
+def find_cercarbono_card_container(node):
+    """Walk up from an H4 heading until an ancestor also holds a document anchor.
+
+    Cercarbono uses the same nested Elementor row-and-column pattern as
+    BioCarbon Registry — the heading and its download link sit in sibling
+    widgets under a common row container.
+    """
+    current = node
+    for _ in range(8):
+        if current.parent is None:
+            return current
+        current = current.parent
+        for anchor in current.find_all("a", href=True):
+            if cercarbono_is_document_href(anchor.get("href", "")):
+                return current
+    return current
+
+
+def parse_cercarbono_version(text: str, href: str) -> str:
+    """Return a normalized version string (e.g. ``V3.1``) parsed from filename or link text."""
+    for source in (text, href):
+        match = CERCARBONO_VERSION_RE.search(source or "")
+        if match:
+            return "V" + re.sub(r"[_\-]", ".", match.group(1))
+    return ""
+
+
+def cercarbono_programme_kind(programme_label: str) -> str:
+    label_l = (programme_label or "").lower()
+    if any(marker in label_l for marker in CERCARBONO_CDM_PROGRAMMES):
+        return "cdm"
+    if any(marker in label_l for marker in CERCARBONO_NATIVE_PROGRAMMES):
+        return "native"
+    return ""
+
+
+def collect_cercarbono_documents(
+    profile: dict,
+    title: str,
+    programme_label: str,
+    programme_kind: str,
+    source_url: str,
+    container,
+    metrics: dict,
+) -> tuple[str, list[dict], list[dict]]:
+    """Return (primary_url, supporting[], errors[]) for a single Cercarbono card."""
+    primary_texts = CERCARBONO_CDM_PRIMARY_TEXTS if programme_kind == "cdm" else CERCARBONO_NATIVE_PRIMARY_TEXTS
+    primary_url = ""
+    supporting: list[dict] = []
+    errors: list[dict] = []
+    seen_urls: set[str] = set()
+    for anchor in container.find_all("a", href=True):
+        href = anchor.get("href", "").strip()
+        if not href or not cercarbono_is_document_href(href):
+            continue
+        absolute = urljoin(source_url, href)
+        text = normalize_text(anchor.get_text(" ", strip=True)) or absolute
+        text_l = text.lower()
+        if not primary_url and any(marker in text_l for marker in primary_texts):
+            primary_url = absolute
+            seen_urls.add(absolute.lower())
+            continue
+        key = absolute.lower()
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        stage = "cdm_sector_catalogue" if programme_kind == "cdm" else "supplement"
+        candidate = make_candidate(
+            profile,
+            "",
+            text,
+            "supporting_document",
+            programme_label,
+            "",
+            "",
+            source_url,
+            absolute,
+            "cercarbono_index_document",
+            "medium",
+            (
+                f"Cercarbono supporting document for '{title}' "
+                f"(programme: {programme_label}, stage: {stage}); body not parsed."
+            ),
+        )
+        candidate["candidate_type"] = "supporting_document"
+        candidate["classification_reason"] = f"Cercarbono methodology supporting document ({stage})."
+        candidate["notes"] = append_note(candidate["notes"], f"evidence_stage: {stage}")
+        supporting.append(candidate)
+        metrics["cc_supporting_documents"] += 1
+
+    if not primary_url:
+        errors.append(
+            make_extraction_error(
+                profile.get("program_name", "Cercarbono"),
+                source_url,
+                "document_link_missing",
+                f"No primary document was identified for '{title}' on the Cercarbono methodologies page.",
+                "Open the source page and confirm the card still exposes a 'Download methodology' or 'Download Excel' anchor.",
+            )
+        )
+        metrics["cc_primary_pdf_missing"] += 1
+    return primary_url, supporting, errors
+
+
+def extract_cercarbono_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = False) -> tuple[list[dict], list[dict], dict[str, int]]:
+    """Extract methodology records from the Cercarbono public methodologies page.
+
+    The page groups H4 methodology cards under H3 programme headings:
+
+    * ``Carbon programme`` / ``Biodiversity programme`` / ``Circular economy
+      programme`` → native Cercarbono methodologies. Each card has a
+      ``Download methodology`` primary PDF anchor; version is parsed from the
+      PDF filename.
+    * ``CDM methodologies`` → sector rows (Energy, Industry, …) each linking
+      to an aggregate ``.xlsx`` catalogue of adopted CDM methods. Emitted as
+      ``unit_type = "adopted_external_method"`` records because they are
+      programme-level catalogues rather than per-methodology PDFs.
+
+    Cards not sitting under a known programme heading (e.g. footer PDFs
+    reached by the walk-up card container heuristic) are ignored. Machine
+    codes are not published on the surface — reviewers open the PDF for the
+    Cercarbono internal code — so ``methodunit_code`` is left blank and the
+    dedupe key falls back to (title, version, document_url).
+    """
+    profile = get_program_profile(profiles, ["Cercarbono"])
+    metrics = {
+        "cc_records_found": 0,
+        "cc_native_records": 0,
+        "cc_adopted_cdm_records": 0,
+        "cc_primary_pdf_attached": 0,
+        "cc_primary_pdf_missing": 0,
+        "cc_supporting_documents": 0,
+    }
+    errors: list[dict] = []
+    source_url = cercarbono_source_url(profile)
+    response, error = fetch_public_source(source_url, "Cercarbono", allow_insecure_ssl)
+    if error:
+        errors.append(error)
+        return [], errors, metrics
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    h4_headings = soup.find_all("h4")
+    kept: list[tuple] = []  # (h4, title, programme_label, programme_kind)
+    for heading in h4_headings:
+        title = normalize_text(heading.get_text(" ", strip=True))
+        if not title:
+            continue
+        # Bound to the "Explore approved methodologies" section — other H4s
+        # (footer nav links, "Why our methodologies matter" quality tiles)
+        # would otherwise attach to whatever programme H3 sat above them.
+        preceding_h2 = heading.find_previous("h2")
+        h2_text = normalize_text(preceding_h2.get_text(" ", strip=True)).lower() if preceding_h2 else ""
+        if not any(marker in h2_text for marker in CERCARBONO_SECTION_H2_MARKERS):
+            continue
+        preceding_h3 = heading.find_previous("h3")
+        programme_label = normalize_text(preceding_h3.get_text(" ", strip=True)) if preceding_h3 else ""
+        programme_kind = cercarbono_programme_kind(programme_label)
+        if not programme_kind:
+            continue
+        kept.append((heading, title, programme_label, programme_kind))
+
+    if not kept:
+        errors.append(
+            make_extraction_error(
+                "Cercarbono",
+                response.url,
+                "no_records_found" if h4_headings else "page_structure_changed",
+                "Cercarbono methodologies page did not expose any H4 methodology cards under a known programme H3.",
+                "Open the source page and confirm the 'Carbon programme'/'Biodiversity programme'/'Circular economy programme'/'CDM methodologies' groups still wrap H4 cards.",
+            )
+        )
+        return [], errors, metrics
+
+    candidates: list[dict] = []
+    seen_dedupe_keys: set[tuple[str, str, str]] = set()
+    for heading, title, programme_label, programme_kind in kept:
+        container = find_cercarbono_card_container(heading)
+        primary_url, supporting, doc_errors = collect_cercarbono_documents(
+            profile, title, programme_label, programme_kind, response.url, container, metrics
+        )
+        errors.extend(doc_errors)
+        candidates.extend(supporting)
+
+        version = parse_cercarbono_version(title, primary_url)
+        dedupe_key = (title.lower(), version.lower(), primary_url.lower())
+        if dedupe_key in seen_dedupe_keys:
+            continue
+        seen_dedupe_keys.add(dedupe_key)
+
+        rich_notes = (
+            "Extracted from the Cercarbono public methodologies page; linked PDFs are captured but not fully parsed."
+        )
+        rich_notes = append_note(rich_notes, f"category: {programme_label}")
+        rich_notes = append_note(rich_notes, "language: English")
+        if programme_kind == "cdm":
+            rich_notes = append_note(
+                rich_notes,
+                "adopted_external_methodology: CDM sector catalogue (Excel spreadsheet lists the specific CDM methods adopted for this sector).",
+            )
+            metrics["cc_adopted_cdm_records"] += 1
+        else:
+            metrics["cc_native_records"] += 1
+
+        if primary_url:
+            metrics["cc_primary_pdf_attached"] += 1
+
+        unit_type = "adopted_external_method" if programme_kind == "cdm" else "methodology"
+        confidence = "high" if primary_url and (version or programme_kind == "cdm") else "medium"
+        candidate = make_candidate(
+            profile,
+            "",
+            title,
+            unit_type,
+            programme_label,
+            version,
+            "Approved",
+            response.url,
+            primary_url,
+            "cercarbono_index_card_scan",
+            confidence,
+            rich_notes,
+        )
+        candidate["candidate_type"] = "methodunit_candidate"
+        candidate["classification_reason"] = (
+            f"Cercarbono CDM sector catalogue ({programme_label})."
+            if programme_kind == "cdm"
+            else f"Cercarbono native methodology card ({programme_label})."
+        )
+        candidates.append(candidate)
+        metrics["cc_records_found"] += 1
+
+    return dedupe_candidates(candidates), errors, metrics
+
+
 def first_url_from_text(value: str) -> str:
     match = re.search(r"https?://[^\s,\"']+", str(value or ""))
     return clean_url(match.group(0)) if match else ""
