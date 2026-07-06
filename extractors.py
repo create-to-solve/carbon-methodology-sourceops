@@ -3065,6 +3065,342 @@ def extract_puro_earth_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bo
     return dedupe_candidates(candidates), errors, metrics
 
 
+ART_TREES_STANDARD_PAGES = (
+    ("TREES 3.0", "https://www.artredd.org/standards/trees-3-0/", "current"),
+    ("TREES 2.0", "https://www.artredd.org/standards/trees-2-0/", "prior"),
+    ("TREES 1.0", "https://www.artredd.org/standards/trees-1-0/", "retired"),
+)
+ART_TREES_VERIFICATION_PAGE = (
+    "TREES Validation and Verification Standard",
+    "https://www.artredd.org/verification/",
+    "current",
+)
+ART_TREES_DOCUMENT_EXTENSIONS = (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".zip")
+ART_TREES_JS_SHELL_IDS = ("root", "app", "__next", "__nuxt")
+ART_TREES_FOOTER_TITLES = ("ART Website Terms of Use", "Privacy Policy")
+ART_TREES_LANGUAGE_TOKENS = {
+    "english": "English",
+    "french": "French",
+    "spanish": "Spanish",
+    "portuguese": "Portuguese",
+    "indonesian": "Indonesian",
+    "bahasa": "Indonesian (Bahasa)",
+}
+ART_TREES_DATE_RE = re.compile(
+    r"(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
+    r"Aug(?:ust)?|Sep(?:tember|t)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[-_\s]?(?P<year>20\d{2})",
+    re.IGNORECASE,
+)
+
+
+def art_trees_is_document_href(href: str) -> bool:
+    href_l = (href or "").split("?", 1)[0].split("#", 1)[0].lower()
+    return href_l.endswith(ART_TREES_DOCUMENT_EXTENSIONS)
+
+
+def art_trees_classify_document(anchor_text: str, href: str) -> str:
+    """Map an anchor to a document family tag used in ``notes: document_type:``."""
+    text_l = (anchor_text or "").lower()
+    filename = unquote(href or "").rsplit("/", 1)[-1].lower()
+    combined = f"{text_l} {filename}"
+    if "val-and-ver-standard" in filename or "validation and verification standard" in text_l:
+        return "validation_verification_standard"
+    if "statement of reasons" in text_l or "statement-of-reasons" in filename:
+        return "statement_of_reasons"
+    if "summary of changes" in text_l or "summary-of-changes" in filename:
+        return "summary_of_changes"
+    if "stakeholder comment" in text_l or "stakeholder-comment" in filename or "comment-and-response" in filename or "comments-and-responses" in filename:
+        return "stakeholder_comments"
+    if "public consultation" in text_l or "public-consultation" in filename:
+        return "public_consultation_draft"
+    if "public comment" in text_l or "public-comment" in filename:
+        return "public_consultation_draft"
+    if "webinar" in combined or "presentation" in combined:
+        return "webinar_presentation"
+    if "exec-summary" in filename or "executive summary" in text_l:
+        return "executive_summary"
+    if "primer" in combined:
+        return "primer"
+    if "guidance" in combined:
+        return "guidance"
+    if "risk assessment matrix" in text_l or "kickoff agenda" in text_l or "audit plan" in combined:
+        return "vvb_template"
+    if "verification opinion" in text_l or "verification report" in text_l or "validation report" in text_l:
+        return "vvb_template"
+    if "finding document" in text_l or "evidence request" in text_l or "conflict of interest" in text_l:
+        return "vvb_template"
+    if "vvb" in combined or "validation and verification bod" in text_l or "attestation" in text_l:
+        return "vvb_directory"
+    if "cross reference table" in text_l or "calculation template" in text_l or "reversal risk rating tool" in text_l:
+        return "template"
+    if any(term in text_l for term in ("concept form", "registration document", "monitoring report", "variance request", "template", " form", "form ")):
+        return "template"
+    if "the redd+ environmental excellence standard" in text_l or filename.startswith("trees-standard") or re.search(r"trees[-_.]?\d(?:[-_.]\d)?[-_.]?(?:final|version|clean|august|february|april|july|june|december)?", filename):
+        return "standard"
+    return "supporting"
+
+
+def art_trees_language_from_text(anchor_text: str, href: str) -> str:
+    combined = f"{(anchor_text or '').lower()} {unquote(href or '').lower()}"
+    for token, label in ART_TREES_LANGUAGE_TOKENS.items():
+        if token in combined:
+            return label
+    return "English"
+
+
+def art_trees_effective_date(anchor_text: str, href: str) -> str:
+    for source in (anchor_text or "", unquote(href or "")):
+        match = ART_TREES_DATE_RE.search(source or "")
+        if match:
+            month = match.group("month").title()
+            year = match.group("year")
+            return f"{month} {year}"
+    return ""
+
+
+def art_trees_dedupe_anchors(anchors: list) -> list:
+    """De-duplicate anchor URLs, skipping fragment and mailto links."""
+    seen: set[str] = set()
+    unique = []
+    for anchor in anchors:
+        href = anchor.get("href", "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        if not art_trees_is_document_href(href):
+            continue
+        if href.lower() in seen:
+            continue
+        seen.add(href.lower())
+        unique.append(anchor)
+    return unique
+
+
+def art_trees_collect_page_documents(soup, response_url: str) -> list[dict]:
+    """Return a de-duplicated list of {text, href, absolute} for every document anchor on the page.
+
+    Anchors whose text/URL matches the site footer boilerplate (Terms of Use,
+    Privacy Policy) are excluded so they don't attach to every record.
+    """
+    docs = []
+    for anchor in art_trees_dedupe_anchors(soup.find_all("a", href=True)):
+        href = anchor.get("href", "").strip()
+        text = normalize_text(anchor.get_text(" ", strip=True))
+        if any(marker in text for marker in ART_TREES_FOOTER_TITLES):
+            continue
+        docs.append({
+            "text": text,
+            "href": href,
+            "url": urljoin(response_url, href),
+        })
+    return docs
+
+
+def art_trees_pick_primary_standard(docs: list[dict], version_label: str, expected_type: str) -> dict | None:
+    """Return the anchor most likely to be the canonical standard PDF for a page.
+
+    ``expected_type`` is either ``"standard"`` (TREES version pages) or
+    ``"validation_verification_standard"`` (verification page). Anchors whose
+    ``art_trees_classify_document`` result doesn't match are skipped.
+    """
+    version_key = version_label.lower().replace(" ", "").replace(".", "")
+    candidates = []
+    for doc in docs:
+        filename = unquote(doc["href"]).rsplit("/", 1)[-1].lower()
+        if not filename.endswith(".pdf"):
+            continue
+        if art_trees_classify_document(doc["text"], doc["href"]) != expected_type:
+            continue
+        # Prefer canonical/English standard PDFs; downrank draft / summary-of-changes / SoR / etc.
+        skip_terms = (
+            "public-comment", "public-consultation", "summary-of-changes",
+            "statement-of-reasons", "comment-and-response", "hfld",
+            "reversal-risk-rating-tool", "exec-summary", "webinar", "presentation",
+            "public-comments", "comments-and-responses",
+        )
+        if any(term in filename for term in skip_terms):
+            continue
+        language = art_trees_language_from_text(doc["text"], doc["href"])
+        version_hit = version_key in filename.replace("-", "").replace(".", "").replace("_", "")
+        candidates.append({
+            "doc": doc,
+            "score": (1 if language == "English" else 0, 1 if version_hit else 0, -len(filename)),
+        })
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item["score"])["doc"]
+
+
+def extract_art_trees_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = False) -> tuple[list[dict], list[dict], dict[str, int]]:
+    """Extract the TREES document family: one standard record per version + one V&V standard.
+
+    Iterates a small fixed list of TREES version pages (``/standards/trees-1-0/``,
+    ``/standards/trees-2-0/``, ``/standards/trees-3-0/``, ``/verification/``).
+    For each page, picks the canonical English standard PDF and emits it as a
+    single ``methodunit_candidate`` with ``unit_type = "standard_document"`` and
+    a ``document_type: standard`` (or ``validation_verification_standard``) note.
+    Every other document on the same page — templates, forms, guidance, primers,
+    statements of reasons, summaries of changes, stakeholder comment logs,
+    webinar decks, executive summaries, per-language variants — is captured as
+    a ``supporting_document`` classified by ``document_type:``. Non-schema
+    fields (``document_type``, ``version``, ``effective_date``, ``language``,
+    ``family``) live in ``notes`` with labels because ``CANDIDATE_SCHEMA`` has
+    no dedicated columns for standard-family metadata.
+
+    The extractor does not treat TREES as a normal methodology catalogue —
+    each row is a document within the TREES standard family, not a
+    per-methodology record.
+    """
+    profile = get_program_profile(profiles, ["ART/TREES"])
+    metrics = {
+        "at_pages_fetched": 0,
+        "at_pages_failed": 0,
+        "at_standard_records_found": 0,
+        "at_supporting_documents": 0,
+        "at_primary_pdf_missing": 0,
+    }
+    errors: list[dict] = []
+    candidates: list[dict] = []
+    seen_dedupe_keys: set[tuple[str, str, str]] = set()
+
+    pages = list(ART_TREES_STANDARD_PAGES) + [ART_TREES_VERIFICATION_PAGE]
+    for version_label, page_url, lifecycle_status in pages:
+        response, error = fetch_public_source(page_url, "ART/TREES", allow_insecure_ssl)
+        if error:
+            metrics["at_pages_failed"] += 1
+            errors.append(error)
+            continue
+        metrics["at_pages_fetched"] += 1
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # Defensive JS-shell probe.
+        for shell_id in ART_TREES_JS_SHELL_IDS:
+            if soup.find(id=shell_id):
+                errors.append(
+                    make_extraction_error(
+                        "ART/TREES",
+                        response.url,
+                        "js_shell_detected",
+                        f"ART/TREES page {version_label} contains a '#{shell_id}' shell — content may be JS-rendered.",
+                        "Manually verify that document anchors are still present in raw HTML.",
+                    )
+                )
+
+        page_docs = art_trees_collect_page_documents(soup, response.url)
+        if not page_docs:
+            errors.append(
+                make_extraction_error(
+                    "ART/TREES",
+                    response.url,
+                    "page_structure_changed",
+                    f"No document anchors were found on the ART/TREES {version_label} page.",
+                    "Open the source page and update the extractor's document-anchor selector.",
+                )
+            )
+            continue
+
+        primary_document_type = (
+            "validation_verification_standard"
+            if version_label.startswith("TREES Validation")
+            else "standard"
+        )
+        primary_doc = art_trees_pick_primary_standard(page_docs, version_label, primary_document_type)
+        primary_url = primary_doc["url"] if primary_doc else ""
+        primary_text = primary_doc["text"] if primary_doc else ""
+        primary_effective = art_trees_effective_date(primary_text, primary_doc["href"] if primary_doc else "")
+        primary_notes = (
+            f"Extracted from the ART/TREES {version_label} page; captures the document family for that standard, "
+            "not a per-methodology record."
+        )
+        primary_notes = append_note(primary_notes, f"document_type: {primary_document_type}")
+        primary_notes = append_note(primary_notes, f"version: {version_label}")
+        primary_notes = append_note(primary_notes, f"family: TREES")
+        primary_notes = append_note(primary_notes, f"lifecycle_status: {lifecycle_status}")
+        primary_notes = append_note(primary_notes, "language: English")
+        if primary_effective:
+            primary_notes = append_note(primary_notes, f"effective_date: {primary_effective}")
+        if not primary_url:
+            primary_notes = append_note(
+                primary_notes,
+                "primary standard PDF could not be identified with the current heuristic; reviewer should confirm.",
+            )
+            errors.append(
+                make_extraction_error(
+                    "ART/TREES",
+                    response.url,
+                    "document_link_missing",
+                    f"No canonical standard PDF was identified on the ART/TREES {version_label} page.",
+                    "Confirm the current standard PDF or update the heuristic in art_trees_pick_primary_standard.",
+                )
+            )
+            metrics["at_primary_pdf_missing"] += 1
+
+        dedupe_key = (version_label.lower(), primary_url.lower(), primary_effective.lower())
+        if dedupe_key not in seen_dedupe_keys:
+            seen_dedupe_keys.add(dedupe_key)
+            confidence = "high" if primary_url and lifecycle_status == "current" else "medium"
+            candidate = make_candidate(
+                profile,
+                "",
+                version_label,
+                "standard_document",
+                "TREES",
+                version_label,
+                lifecycle_status.title(),
+                response.url,
+                primary_url,
+                "art_trees_document_family_scan",
+                confidence,
+                primary_notes,
+            )
+            candidate["candidate_type"] = "methodunit_candidate"
+            candidate["classification_reason"] = (
+                f"ART/TREES {version_label} document family "
+                f"({'validation & verification standard' if primary_document_type == 'validation_verification_standard' else 'programme standard'})."
+            )
+            candidates.append(candidate)
+            metrics["at_standard_records_found"] += 1
+
+        # Emit supporting documents for every other anchor on the page.
+        for doc in page_docs:
+            if primary_url and doc["url"].lower() == primary_url.lower():
+                continue
+            document_type = art_trees_classify_document(doc["text"], doc["href"])
+            language = art_trees_language_from_text(doc["text"], doc["href"])
+            effective = art_trees_effective_date(doc["text"], doc["href"])
+            supporting_notes = (
+                f"ART/TREES {version_label} supporting document ({document_type}); body not parsed."
+            )
+            supporting_notes = append_note(supporting_notes, f"document_type: {document_type}")
+            supporting_notes = append_note(supporting_notes, f"version: {version_label}")
+            supporting_notes = append_note(supporting_notes, f"family: TREES")
+            supporting_notes = append_note(supporting_notes, f"language: {language}")
+            if effective:
+                supporting_notes = append_note(supporting_notes, f"effective_date: {effective}")
+            supporting = make_candidate(
+                profile,
+                "",
+                doc["text"] or doc["url"],
+                "supporting_document",
+                "TREES",
+                version_label,
+                lifecycle_status.title(),
+                response.url,
+                doc["url"],
+                "art_trees_family_document",
+                "medium",
+                supporting_notes,
+            )
+            supporting["candidate_type"] = "supporting_document"
+            supporting["classification_reason"] = (
+                f"ART/TREES {version_label} document family member ({document_type})."
+            )
+            supporting["notes"] = append_note(supporting["notes"], f"evidence_stage: {document_type}")
+            candidates.append(supporting)
+            metrics["at_supporting_documents"] += 1
+
+    return dedupe_candidates(candidates), errors, metrics
+
+
 def first_url_from_text(value: str) -> str:
     match = re.search(r"https?://[^\s,\"']+", str(value or ""))
     return clean_url(match.group(0)) if match else ""
