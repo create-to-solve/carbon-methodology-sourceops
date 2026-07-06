@@ -443,6 +443,79 @@ def has_ssl_or_access_issue(errors: pd.DataFrame) -> bool:
     return any(term in issue_text for term in ["ssl", "certificate", "access", "connection"])
 
 
+def review_record_key(row: pd.Series | dict) -> str:
+    getter = row.get
+    parts = [
+        normalize_text(getter("program_name", "")),
+        normalize_text(getter("methodunit_code", "")),
+        normalize_text(getter("methodunit_name", "")),
+        clean_url(getter("document_url", "") or getter("source_url", "")),
+    ]
+    return "|".join(parts)
+
+
+def apply_saved_review_status(records: pd.DataFrame) -> pd.DataFrame:
+    if records.empty:
+        return records.copy()
+    reviewed = current_review_decisions()
+    if reviewed.empty:
+        return records.copy()
+    latest_decisions = {}
+    for _, decision in reviewed.iterrows():
+        latest_decisions[review_record_key(decision)] = normalize_text(decision.get("review_decision", ""))
+    updated = records.copy()
+    for index, row in updated.iterrows():
+        decision = latest_decisions.get(review_record_key(row))
+        if decision:
+            updated.at[index, "review_status"] = decision
+    return updated
+
+
+def review_table(records: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "Source/programme",
+        "Methodology / document title",
+        "Version",
+        "Status",
+        "Unit type",
+        "Review status",
+        "Primary document link",
+    ]
+    if records.empty:
+        return pd.DataFrame(columns=columns)
+    table = records.copy()
+    return pd.DataFrame(
+        {
+            "Source/programme": table.get("program_name", ""),
+            "Methodology / document title": table.get("methodunit_name", ""),
+            "Version": table.get("version", ""),
+            "Status": table.get("status", ""),
+            "Unit type": table.get("unit_type", ""),
+            "Review status": table.get("review_status", ""),
+            "Primary document link": table.get("document_url", ""),
+        }
+    )
+
+
+def review_source_options(records: pd.DataFrame) -> list[str]:
+    stable_with_records = [source for source in STABLE_EXTRACTORS if not records_for_source(records, source).empty]
+    experimental_with_records = [
+        source for source in EXPERIMENTAL_EXTRACTORS if not records_for_source(records, source).empty
+    ]
+    return stable_with_records + experimental_with_records
+
+
+def default_review_source_index(options: list[str]) -> int:
+    preferred = ["American Carbon Registry / ACR", "Cercarbono"]
+    for source in preferred:
+        if source in options:
+            return options.index(source)
+    for index, source in enumerate(options):
+        if source in STABLE_EXTRACTORS:
+            return index
+    return 0
+
+
 def supporting_documents_for_record(record: pd.Series, links: pd.DataFrame) -> pd.DataFrame:
     if links.empty:
         return pd.DataFrame(columns=CANDIDATE_SCHEMA)
@@ -3378,55 +3451,92 @@ def extract_page(data: dict[str, pd.DataFrame]) -> None:
 
 def review_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Review")
-    st.write("Review extracted methodology/document records and save a human decision before export.")
+    st.write("Select an extracted record, inspect its evidence, save a review decision, and export reviewed records.")
 
     records, records_source = records_for_workbench()
     links, _links_source = links_for_workbench()
     if records.empty:
-        st.info("No extracted records are available yet. Use Extract to check a source for updates.")
+        st.info("No extracted records are available for review. Go to Extract to load records or check a source for updates.")
         return
 
-    source_options = ["All sources"] + [source for source in PUBLIC_EXTRACTORS if not records_for_source(records, source).empty]
-    selected_source = st.selectbox("Source", source_options, key="review_source_filter")
-    filtered = records.copy()
-    if selected_source != "All sources":
-        filtered = records_for_source(filtered, selected_source)
+    records = apply_saved_review_status(records)
+    source_options = review_source_options(records)
+    if not source_options:
+        st.info("No extracted records are available for review. Go to Extract to load records or check a source for updates.")
+        return
 
-    st.caption(f"Review queue: {records_source}")
+    filter_col_0, filter_col_1 = st.columns([2, 1], gap="small")
+    with filter_col_0:
+        selected_source = st.selectbox(
+            "Source",
+            source_options,
+            index=default_review_source_index(source_options),
+            key="review_source_filter",
+        )
+    filtered = records_for_source(records, selected_source)
+    review_status_options = sorted(
+        {
+            normalize_text(value) or "pending_review"
+            for value in filtered.get("review_status", pd.Series("", index=filtered.index)).astype(str)
+        }
+    )
+    with filter_col_1:
+        selected_review_status = st.selectbox(
+            "Review status",
+            ["All"] + review_status_options,
+            key="review_status_filter",
+        )
+    if selected_review_status != "All":
+        status_values = filtered.get("review_status", pd.Series("", index=filtered.index)).astype(str).apply(
+            lambda value: normalize_text(value) or "pending_review"
+        )
+        filtered = filtered[status_values.eq(selected_review_status)].copy()
+
+    if filtered.empty:
+        st.info("No records are available for this source in the current extraction package.")
+        return
+
+    st.subheader("Records")
     st.dataframe(
-        workbench_record_table(filtered),
+        review_table(filtered),
         hide_index=True,
         use_container_width=True,
         height=300,
-        column_config={"Primary document": st.column_config.LinkColumn("Primary document", display_text="Open")},
+        column_config={
+            "Source/programme": st.column_config.TextColumn("Source/programme", width="medium"),
+            "Methodology / document title": st.column_config.TextColumn("Methodology / document title", width="large"),
+            "Version": st.column_config.TextColumn("Version", width="small"),
+            "Status": st.column_config.TextColumn("Status", width="small"),
+            "Unit type": st.column_config.TextColumn("Unit type", width="small"),
+            "Review status": st.column_config.TextColumn("Review status", width="small"),
+            "Primary document link": st.column_config.LinkColumn(
+                "Primary document link",
+                display_text="Open",
+                width="small",
+            ),
+        },
     )
-
-    if filtered.empty:
-        st.info("No records match the selected source.")
-        return
 
     labels = []
     for idx, row in filtered.reset_index().iterrows():
         title = normalize_text(row.get("methodunit_name", "")) or "(untitled record)"
-        programme = normalize_text(row.get("program_name", ""))
         version = normalize_text(row.get("version", ""))
-        labels.append(f"{idx + 1}. {programme} - {title}" + (f" ({version})" if version else ""))
+        labels.append(f"{idx + 1}. {title}" + (f" ({version})" if version else ""))
     selected_label = st.selectbox("Selected record", labels, key="review_record_select")
     selected_position = labels.index(selected_label)
     selected_record = filtered.reset_index(drop=True).iloc[selected_position]
 
-    st.subheader("Selected Record")
+    st.subheader("Selected Record Detail")
     primary_url = clean_url(selected_record.get("document_url") or selected_record.get("source_url"))
     supporting = supporting_documents_for_record(selected_record, links)
+    title = normalize_text(selected_record.get("methodunit_name", "")) or "(untitled record)"
     detail_rows = [
+        {"Field": "Title", "Value": title},
         {"Field": "Source/programme", "Value": selected_record.get("program_name", "")},
-        {"Field": "Methodology/document title", "Value": selected_record.get("methodunit_name", "")},
         {"Field": "Version", "Value": selected_record.get("version", "")},
         {"Field": "Status", "Value": selected_record.get("status", "")},
         {"Field": "Unit type", "Value": selected_record.get("unit_type", "")},
-        {"Field": "Primary document link", "Value": primary_url},
         {"Field": "Supporting document count", "Value": len(supporting)},
-        {"Field": "Extracted notes", "Value": selected_record.get("notes", "")},
     ]
     st.dataframe(
         pd.DataFrame(detail_rows),
@@ -3437,12 +3547,19 @@ def review_page(data: dict[str, pd.DataFrame]) -> None:
         st.link_button("Open primary document", primary_url)
 
     if not supporting.empty:
-        with st.expander("Supporting links", expanded=False):
+        with st.expander("Supporting document links", expanded=False):
             show_dataframe(
                 select_existing(supporting, ["methodunit_name", "candidate_type", "document_url", "source_url", "notes"]),
                 "review_supporting_links",
                 height=220,
             )
+    else:
+        st.caption("No supporting document links were captured for this record.")
+
+    notes = normalize_text(selected_record.get("notes", ""))
+    if notes:
+        st.caption("Extracted notes")
+        st.write(notes)
 
     decision = st.radio(
         "Review decision",
@@ -3469,7 +3586,8 @@ def review_page(data: dict[str, pd.DataFrame]) -> None:
         if path is None:
             st.warning("No review decision was available to save.")
         else:
-            st.success(f"Saved review decision to {path}")
+            st.success("Review decision saved.")
+            st.rerun()
 
     reviewed = current_review_decisions()
     st.subheader("Export Reviewed Records")
