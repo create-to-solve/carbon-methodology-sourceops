@@ -1861,6 +1861,283 @@ def extract_social_carbon_candidates(profiles: pd.DataFrame, allow_insecure_ssl:
     return dedupe_candidates(candidates), errors, metrics
 
 
+PLAN_VIVO_CANONICAL_SOURCE_URL = (
+    "https://www.planvivo.org/projects/certify-a-project/pvclimate/methodologies/approved-methodologies"
+)
+PLAN_VIVO_CODE_RE = re.compile(r"\bPM\s?\d{3,}\b", re.IGNORECASE)
+PLAN_VIVO_DOCUMENT_EXTENSIONS = (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".zip")
+PLAN_VIVO_METADATA_LABELS = {
+    "status": re.compile(r"Status:\s*([^\|\n\r]+?)(?=\s+(?:Type|Version|Developer|Reviewers?|Active from)\b|$)", re.IGNORECASE),
+    "type": re.compile(r"Type:\s*([^\|\n\r]+?)(?=\s+(?:Status|Version|Developer|Reviewers?|Active from)\b|$)", re.IGNORECASE),
+    "version": re.compile(r"Version\s+([0-9]+(?:\.[0-9]+)?):", re.IGNORECASE),
+    "active_from": re.compile(r"Active from:\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4})", re.IGNORECASE),
+    "developer": re.compile(r"Developer:\s*([^\n\r]+?)(?=\s+Reviewers?:|$)", re.IGNORECASE),
+    "reviewers": re.compile(r"Reviewers?:\s*([^\n\r]+?)(?=\s+(?:Status|Type|Version|Developer|Active from)\b|$)", re.IGNORECASE),
+}
+
+
+def plan_vivo_source_url(profile: dict) -> str:
+    """Prefer the verified approved-methodologies URL, ignoring any stale entries."""
+    candidate = profile_source_url(profile)
+    if candidate and "planvivo.org/projects/certify-a-project" in candidate.lower():
+        return candidate
+    return PLAN_VIVO_CANONICAL_SOURCE_URL
+
+
+def plan_vivo_is_document_href(href: str) -> bool:
+    href_l = (href or "").split("?", 1)[0].split("#", 1)[0].lower()
+    return href_l.endswith(PLAN_VIVO_DOCUMENT_EXTENSIONS)
+
+
+def _plan_vivo_extract_label(pattern: re.Pattern, text: str) -> str:
+    match = pattern.search(text or "")
+    return normalize_text(match.group(1)) if match else ""
+
+
+def parse_plan_vivo_metadata(text: str) -> dict[str, str]:
+    return {label: _plan_vivo_extract_label(pattern, text) for label, pattern in PLAN_VIVO_METADATA_LABELS.items()}
+
+
+def parse_plan_vivo_article(article) -> dict:
+    """Return {code, title, description, metadata_text, anchors} for a Plan Vivo methodology article."""
+    headings = article.find_all(["h2", "h3", "h4"])
+    code = ""
+    title = ""
+    for heading in headings:
+        text = normalize_text(heading.get_text(" ", strip=True))
+        if not code:
+            match = PLAN_VIVO_CODE_RE.search(text)
+            if match:
+                code = match.group(0).replace(" ", "").upper()
+                # If the same heading also contains the title (e.g. "PM001 Agriculture ..."),
+                # grab the tail as the title.
+                trailing = normalize_text(text[match.end():])
+                if trailing and not title:
+                    title = trailing
+                continue
+        if code and not title:
+            title = text
+            break
+    if not code:
+        return {}
+    metadata_text = ""
+    for paragraph in article.find_all("p"):
+        p_text = normalize_text(paragraph.get_text(" ", strip=True))
+        if "Status" in p_text and ("Type" in p_text or "Version" in p_text):
+            metadata_text = p_text
+            break
+    if not metadata_text:
+        # Fallback: full article text minus title/code.
+        metadata_text = normalize_text(article.get_text(" ", strip=True))
+    description = ""
+    for paragraph in article.find_all("p"):
+        p_text = normalize_text(paragraph.get_text(" ", strip=True))
+        if p_text and "Status" not in p_text and PLAN_VIVO_CODE_RE.search(p_text) is None and len(p_text) > 40:
+            description = p_text
+            break
+    return {
+        "code": code,
+        "title": title,
+        "description": description,
+        "metadata_text": metadata_text,
+        "anchors": article.find_all("a", href=True),
+    }
+
+
+def classify_plan_vivo_anchor(text: str, code: str) -> str:
+    """Return a stage tag for a Plan Vivo document anchor.
+
+    ``primary`` = the current-version methodology PDF (link text starts with the
+    PM code or is exactly ``View PM###``). ``assessment`` = the paired
+    assessment/review report. ``supporting`` = anything else.
+    """
+    text_l = (text or "").strip().lower()
+    if not text_l:
+        return "supporting"
+    if text_l.startswith("view " + code.lower()):
+        return "primary"
+    if text_l.startswith(code.lower()):
+        # Matches "PM001 V1.0" style link text.
+        return "primary"
+    if "assessment" in text_l or "review" in text_l:
+        return "assessment"
+    if "public comment" in text_l or "consultation" in text_l:
+        return "public_comments"
+    return "supporting"
+
+
+def collect_plan_vivo_documents(profile: dict, record: dict, index_url: str, metrics: dict) -> tuple[str, list[dict], list[dict]]:
+    """Split an article's document anchors into (primary_url, supporting[], errors[])."""
+    primary_url = ""
+    supporting: list[dict] = []
+    errors: list[dict] = []
+    seen_urls: set[str] = set()
+    for anchor in record["anchors"]:
+        href = anchor.get("href", "").strip()
+        if not href or not plan_vivo_is_document_href(href):
+            continue
+        absolute = urljoin(index_url, href)
+        text = normalize_text(anchor.get_text(" ", strip=True)) or absolute
+        stage = classify_plan_vivo_anchor(text, record["code"])
+        if stage == "primary" and not primary_url:
+            primary_url = absolute
+            seen_urls.add(absolute.lower())
+            continue
+        key = absolute.lower()
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        candidate = make_candidate(
+            profile,
+            record["code"],
+            text,
+            "supporting_document",
+            "",
+            "",
+            "",
+            index_url,
+            absolute,
+            "plan_vivo_index_document",
+            "medium",
+            f"Plan Vivo document for {record['code']} '{record['title']}' "
+            f"(stage: {stage}); body not parsed.",
+        )
+        candidate["candidate_type"] = "supporting_document"
+        candidate["classification_reason"] = f"Plan Vivo methodology supporting document ({stage})."
+        candidate["notes"] = append_note(candidate["notes"], f"evidence_stage: {stage}")
+        supporting.append(candidate)
+        metrics["pv_supporting_documents"] += 1
+        if stage == "assessment":
+            metrics["pv_assessment_reports_captured"] += 1
+
+    if not primary_url:
+        errors.append(
+            make_extraction_error(
+                profile.get("program_name", "Plan Vivo"),
+                index_url,
+                "document_link_missing",
+                f"No primary methodology PDF was identified in the Plan Vivo article for '{record['code']}'.",
+                "Open the source page and confirm which anchor represents the current methodology PDF.",
+            )
+        )
+        metrics["pv_primary_pdf_missing"] += 1
+    return primary_url, supporting, errors
+
+
+def extract_plan_vivo_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = False) -> tuple[list[dict], list[dict], dict[str, int]]:
+    """Extract Plan Vivo approved-methodology records from the public PV Climate page.
+
+    The approved-methodologies page hosts one ``<article>`` block per
+    methodology (currently PM001 and PM002). Each article carries a PM code,
+    title, description, and a ``Status: … Type: … Version …: PM### V… |
+    Assessment Report (Active from: …) Developer: … Reviewers: …`` metadata
+    line, plus S3-hosted PDFs for the methodology, an assessment report, and
+    any supporting documents. No detail-page follow-through is required.
+
+    Non-schema fields (``type``, ``active_from``, ``developer``,
+    ``reviewers``) are surfaced through labelled ``notes`` entries so the
+    ``CANDIDATE_SCHEMA`` is preserved. The assessment PDF is captured as a
+    supporting document tagged ``evidence_stage: assessment``; the current
+    methodology PDF is attached as ``document_url``.
+    """
+    profile = get_program_profile(profiles, ["Plan Vivo"])
+    metrics = {
+        "pv_records_found": 0,
+        "pv_primary_pdf_attached": 0,
+        "pv_primary_pdf_missing": 0,
+        "pv_assessment_reports_captured": 0,
+        "pv_supporting_documents": 0,
+    }
+    errors: list[dict] = []
+    source_url = plan_vivo_source_url(profile)
+    response, error = fetch_public_source(source_url, "Plan Vivo", allow_insecure_ssl)
+    if error:
+        errors.append(error)
+        return [], errors, metrics
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    # The page nests per-methodology articles inside a wrapper article; only
+    # leaf articles (no nested <article> children) hold a single PM record.
+    articles = [article for article in soup.find_all("article") if not article.find("article")]
+    parsed_records: list[dict] = []
+    for article in articles:
+        record = parse_plan_vivo_article(article)
+        if record and record.get("code"):
+            parsed_records.append(record)
+
+    if not parsed_records:
+        errors.append(
+            make_extraction_error(
+                "Plan Vivo",
+                response.url,
+                "page_structure_changed",
+                "Plan Vivo approved-methodologies page no longer contains <article> blocks with PM### codes.",
+                "Open the source page manually and update the article/code selectors.",
+            )
+        )
+        return [], errors, metrics
+
+    candidates: list[dict] = []
+    seen_dedupe_keys: set[tuple[str, str]] = set()
+    for record in parsed_records:
+        metadata = parse_plan_vivo_metadata(record["metadata_text"])
+        document_url, supporting, doc_errors = collect_plan_vivo_documents(
+            profile, record, response.url, metrics
+        )
+        errors.extend(doc_errors)
+        if document_url:
+            metrics["pv_primary_pdf_attached"] += 1
+            candidates.extend(supporting)
+        else:
+            # Still capture supporting docs even when the primary PDF failed.
+            candidates.extend(supporting)
+
+        dedupe_key = (record["code"].lower(), document_url.lower())
+        if dedupe_key in seen_dedupe_keys:
+            continue
+        seen_dedupe_keys.add(dedupe_key)
+
+        rich_notes = (
+            "Extracted from the Plan Vivo approved-methodologies page; linked PDFs "
+            "are captured but not fully parsed."
+        )
+        if metadata.get("type"):
+            rich_notes = append_note(rich_notes, f"type: {metadata['type']}")
+        if metadata.get("active_from"):
+            rich_notes = append_note(rich_notes, f"active_from: {metadata['active_from']}")
+        if metadata.get("developer"):
+            rich_notes = append_note(rich_notes, f"developer: {metadata['developer']}")
+        if metadata.get("reviewers"):
+            rich_notes = append_note(rich_notes, f"reviewers: {metadata['reviewers']}")
+        if record.get("description"):
+            rich_notes = append_note(rich_notes, f"description: {record['description'][:200]}")
+
+        version_value = f"Version {metadata['version']}" if metadata.get("version") else ""
+        status_value = metadata.get("status") or "Approved"
+        confidence = "high" if document_url and metadata.get("version") else "medium"
+        candidate = make_candidate(
+            profile,
+            record["code"],
+            record["title"] or f"{record['code']} (title requires review)",
+            "approved_methodology",
+            "",
+            version_value,
+            status_value,
+            response.url,
+            document_url,
+            "plan_vivo_index_article_parse",
+            confidence,
+            rich_notes,
+        )
+        candidate["candidate_type"] = "methodunit_candidate"
+        candidate["classification_reason"] = f"Plan Vivo approved-methodology article ({record['code']})."
+        candidates.append(candidate)
+        metrics["pv_records_found"] += 1
+
+    return dedupe_candidates(candidates), errors, metrics
+
+
 def first_url_from_text(value: str) -> str:
     match = re.search(r"https?://[^\s,\"']+", str(value or ""))
     return clean_url(match.group(0)) if match else ""

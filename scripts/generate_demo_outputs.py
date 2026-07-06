@@ -12,6 +12,7 @@ from extractors import (  # noqa: E402
     extract_cfc_candidates,
     extract_climate_action_reserve_candidates,
     extract_climate_forward_candidates,
+    extract_plan_vivo_candidates,
     extract_social_carbon_candidates,
     resolve_artisan_c_sink_source,
 )
@@ -70,6 +71,7 @@ def main() -> None:
         ("Climate Forward", extract_climate_forward_candidates),
         ("American Carbon Registry (ACR)", extract_acr_candidates),
         ("Social Carbon", extract_social_carbon_candidates),
+        ("Plan Vivo", extract_plan_vivo_candidates),
     ]:
         candidates, errors, _metrics = normalize_result(extractor(profiles, allow_insecure_ssl=False))
         all_candidates.extend(candidates)
