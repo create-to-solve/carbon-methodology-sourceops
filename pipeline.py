@@ -210,6 +210,7 @@ SUPPORTED_EXTRACTORS = [
     "Plan Vivo",
     "BioCarbon Registry / BCR",
     "Cercarbono",
+    "Puro Earth",
 ]
 
 SOURCE_RESOLUTION_SOURCES = [
@@ -1585,6 +1586,7 @@ def run_candidate_extractors(
         extract_plan_vivo_candidates,
         extract_biocarbon_registry_candidates,
         extract_cercarbono_candidates,
+        extract_puro_earth_candidates,
     )
 
     extractor_map = {
@@ -1598,6 +1600,7 @@ def run_candidate_extractors(
         "Plan Vivo": extract_plan_vivo_candidates,
         "BioCarbon Registry / BCR": extract_biocarbon_registry_candidates,
         "Cercarbono": extract_cercarbono_candidates,
+        "Puro Earth": extract_puro_earth_candidates,
     }
     all_candidates = []
     errors = []
@@ -1650,6 +1653,14 @@ def run_candidate_extractors(
         "cc_primary_pdf_attached": 0,
         "cc_primary_pdf_missing": 0,
         "cc_supporting_documents": 0,
+        "pe_records_found": 0,
+        "pe_landing_methodologies_seen": 0,
+        "pe_library_pdfs_seen": 0,
+        "pe_primary_pdf_attached": 0,
+        "pe_primary_pdf_missing": 0,
+        "pe_supporting_documents": 0,
+        "pe_programme_documents": 0,
+        "pe_document_library_fetch_failed": 0,
     }
     for extractor_name in selected_extractors:
         extractor = extractor_map.get(extractor_name)

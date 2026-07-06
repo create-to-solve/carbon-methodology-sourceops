@@ -2,7 +2,7 @@ import hashlib
 import re
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import pandas as pd
 
@@ -2646,6 +2646,421 @@ def extract_cercarbono_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bo
         )
         candidates.append(candidate)
         metrics["cc_records_found"] += 1
+
+    return dedupe_candidates(candidates), errors, metrics
+
+
+PURO_EARTH_LANDING_URL = "https://puro.earth/cdr-infrastructure/methodologies/"
+PURO_EARTH_DOCUMENT_LIBRARY_URL = "https://puro.earth/cdr-infrastructure/methodologies/document-library/"
+PURO_EARTH_DOCUMENT_EXTENSIONS = (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".zip")
+PURO_EARTH_LEARN_MORE_TEXTS = ("learn more",)
+PURO_EARTH_METHODOLOGY_DETAIL_PREFIX = "https://puro.earth/methodologies/"
+PURO_EARTH_LIBRARY_H2_MARKERS = (
+    "puro standard & methodologies",
+    "puro standard and methodologies",
+)
+PURO_EARTH_PROGRAMME_H2_MARKERS = ("multi-program requirements",)
+PURO_EARTH_TRANSITION_MARKERS = ("transition plan",)
+PURO_EARTH_JS_SHELL_IDS = ("root", "app", "__next", "__nuxt")
+PURO_EARTH_EDITION_RE = re.compile(
+    r"Edition[\s._-]?(20\d{2})[\s(_-]*(?:version|v)?[\s._-]?(\d+(?:[._-]\d+)?)?", re.IGNORECASE
+)
+PURO_EARTH_VERSION_RE = re.compile(r"V[\s._-]?(\d+(?:[._-]\d+)?)", re.IGNORECASE)
+
+
+def puro_earth_landing_url(profile: dict) -> str:
+    candidate = profile_source_url(profile)
+    if candidate and "puro.earth" in candidate.lower() and (
+        "/methodolog" in candidate.lower() or "/carbon-removal-methods" in candidate.lower()
+    ):
+        return candidate
+    return PURO_EARTH_LANDING_URL
+
+
+def puro_earth_is_document_href(href: str) -> bool:
+    href_l = (href or "").split("?", 1)[0].split("#", 1)[0].lower()
+    return href_l.endswith(PURO_EARTH_DOCUMENT_EXTENSIONS)
+
+
+def puro_earth_normalize_name(text: str) -> str:
+    """Return a lowercase key with punctuation stripped for cross-page matching."""
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def parse_puro_earth_landing(soup, response_url: str) -> list[dict]:
+    """Return methodology records with (title, detail_url) parsed from the landing page's H3 cards."""
+    records: list[dict] = []
+    seen: set[str] = set()
+    for anchor in soup.find_all("a", href=True):
+        text = normalize_text(anchor.get_text(" ", strip=True)).lower()
+        href = anchor.get("href", "").strip()
+        if not any(marker in text for marker in PURO_EARTH_LEARN_MORE_TEXTS):
+            continue
+        if PURO_EARTH_METHODOLOGY_DETAIL_PREFIX not in href.lower():
+            continue
+        heading = anchor.find_previous(["h3", "h4", "h2"])
+        title = normalize_text(heading.get_text(" ", strip=True)) if heading else ""
+        if not title:
+            continue
+        key = puro_earth_normalize_name(title)
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append({
+            "title": title,
+            "detail_url": urljoin(response_url, href.rstrip("/") + "/"),
+        })
+    return records
+
+
+def parse_puro_earth_edition(text: str, href: str) -> str:
+    """Return a normalized 'Edition YYYY vN' or 'Edition YYYY' string when parseable."""
+    for source in (text, unquote(href or "")):
+        if not source:
+            continue
+        edition_match = PURO_EARTH_EDITION_RE.search(source)
+        if edition_match:
+            year, version = edition_match.group(1), edition_match.group(2)
+            if version:
+                version_norm = re.sub(r"[_\-]", ".", version)
+                return f"Edition {year} v{version_norm}"
+            return f"Edition {year}"
+        version_match = PURO_EARTH_VERSION_RE.search(source)
+        if version_match:
+            return "V" + re.sub(r"[_\-]", ".", version_match.group(1))
+    return ""
+
+
+def classify_puro_earth_pdf(anchor_text: str, href: str, methodology_title: str) -> str:
+    text_l = normalize_text(anchor_text).lower()
+    href_l = (href or "").lower()
+    combined = f"{text_l} {href_l}"
+    if any(marker in combined for marker in PURO_EARTH_TRANSITION_MARKERS):
+        return "transition_plan"
+    if "clarification" in combined:
+        return "clarification"
+    if "supplement" in combined or "annex" in combined:
+        return "supplement"
+    if "public consultation" in combined or "for consultation" in combined:
+        return "public_consultation"
+    if methodology_title and puro_earth_normalize_name(methodology_title) not in puro_earth_normalize_name(f"{text_l} {href_l}"):
+        return "historical_version"
+    return "supporting"
+
+
+def puro_earth_pdf_search_text(anchor_text: str, href: str) -> str:
+    """Return a URL-decoded, lowercased combination of anchor text + href for matching.
+
+    Both inputs are unquoted before joining. Anchor text can be an
+    icon-only fallback that carries the raw percent-encoded URL, and if we
+    leave it encoded the score regex ends up matching ``%20`` + ``2025`` as
+    year ``2020`` — a subtle but real bug.
+    """
+    return f"{normalize_text(unquote(anchor_text or '')).lower()} {unquote(href or '').lower()}"
+
+
+def is_puro_earth_methodology_pdf(anchor_text: str, href: str, methodology_title: str) -> bool:
+    """Return True when a PDF anchor plausibly represents a candidate for the primary methodology document.
+
+    We trust the H3 heading match (established by ``library_by_key``) to
+    scope a PDF to its methodology, so we only reject anchors whose
+    **filename** clearly labels a transition plan, clarification, annex, or
+    consultation draft. Folder paths are ignored — Puro sometimes stores the
+    current published PDF under ``Public Consultations/`` even after the
+    consultation closed.
+    """
+    filename = unquote(href or "").rsplit("/", 1)[-1].lower()
+    if not filename:
+        return False
+    if "transition" in filename:
+        return False
+    if any(term in filename for term in ("clarification", "annex", "summary of", "public comment", "consultation")):
+        return False
+    return True
+
+
+def score_puro_earth_primary_pdf(anchor_text: str, href: str) -> tuple[int, int, int]:
+    """Rank a candidate primary PDF: higher edition year, then higher version, then shorter filename."""
+    combined = puro_earth_pdf_search_text(anchor_text, href)
+    year_match = re.search(r"edition\s*(20\d{2})|(20\d{2})", combined, re.IGNORECASE)
+    year = int(year_match.group(1) or year_match.group(2)) if year_match else 0
+    version_match = re.search(r"v[\s._-]?(\d+)", combined, re.IGNORECASE)
+    version = int(version_match.group(1)) if version_match else 0
+    # Prefer shorter filenames (avoids picking a "For Publication" archive over the canonical name).
+    inverse_len = -len(href or "")
+    return (year, version, inverse_len)
+
+
+def collect_puro_earth_library_sections(soup, response_url: str) -> list[dict]:
+    """Group document-library PDF anchors under their nearest preceding H3 heading."""
+    sections: list[dict] = []
+    current = None
+    for element in soup.find_all(["h2", "h3", "a"]):
+        if element.name == "h2":
+            heading_text = normalize_text(element.get_text(" ", strip=True))
+            current = {"section": heading_text, "heading": "", "pdfs": []}
+            sections.append(current)
+            continue
+        if element.name == "h3":
+            heading_text = normalize_text(element.get_text(" ", strip=True))
+            current = {"section": sections[-1]["section"] if sections else "", "heading": heading_text, "pdfs": []}
+            sections.append(current)
+            continue
+        if element.name == "a":
+            href = element.get("href", "").strip()
+            if not href or not puro_earth_is_document_href(href):
+                continue
+            if current is None:
+                current = {"section": "", "heading": "", "pdfs": []}
+                sections.append(current)
+            absolute = urljoin(response_url, href)
+            current["pdfs"].append({
+                "text": normalize_text(element.get_text(" ", strip=True)) or absolute,
+                "href": href,
+                "url": absolute,
+            })
+    return [section for section in sections if section["pdfs"] or section["heading"]]
+
+
+def extract_puro_earth_candidates(profiles: pd.DataFrame, allow_insecure_ssl: bool = False) -> tuple[list[dict], list[dict], dict[str, int]]:
+    """Extract methodology records from Puro.earth's public methodologies + document library.
+
+    Two pages are consulted:
+
+    * ``/cdr-infrastructure/methodologies/`` provides the canonical list of 8
+      methodology cards (H3 title + ``learn more`` anchor to a per-methodology
+      detail page).
+    * ``/cdr-infrastructure/methodologies/document-library/`` groups every
+      HubSpot-hosted PDF by H3 heading. Sections whose heading matches a
+      landing-page methodology contribute the primary PDF + supporting
+      documents (transition plans, historical editions, clarifications).
+      Sections under ``Multi-program requirements`` are captured as
+      programme-level supporting documents (Certification Procedures, Common
+      Criteria, Puro Standard General Rules, Article 6, Additionality, …).
+
+    Non-schema fields (``category``, ``removal_type``, ``version``, ``status``)
+    are surfaced via labelled ``notes`` entries so ``CANDIDATE_SCHEMA`` is
+    preserved. Detail-page follow-through is **not** required for the current
+    methodology PDFs; the extractor never fetches per-methodology detail
+    pages because the document library already exposes the current PDFs.
+    """
+    profile = get_program_profile(profiles, ["Puro Earth", "Puro.earth"])
+    metrics = {
+        "pe_records_found": 0,
+        "pe_landing_methodologies_seen": 0,
+        "pe_library_pdfs_seen": 0,
+        "pe_primary_pdf_attached": 0,
+        "pe_primary_pdf_missing": 0,
+        "pe_supporting_documents": 0,
+        "pe_programme_documents": 0,
+        "pe_document_library_fetch_failed": 0,
+    }
+    errors: list[dict] = []
+    landing_url = puro_earth_landing_url(profile)
+    landing_response, landing_error = fetch_public_source(landing_url, "Puro Earth", allow_insecure_ssl)
+    if landing_error:
+        errors.append(landing_error)
+        return [], errors, metrics
+
+    landing_soup = BeautifulSoup(landing_response.text, "html.parser")
+    # Detect JS shells even though we expect static HTML.
+    for shell_id in PURO_EARTH_JS_SHELL_IDS:
+        if landing_soup.find(id=shell_id):
+            errors.append(
+                make_extraction_error(
+                    "Puro Earth",
+                    landing_response.url,
+                    "js_shell_detected",
+                    f"Puro Earth landing page contains a '#{shell_id}' shell — content may be JS-rendered.",
+                    "Manually verify whether methodology names are still present in raw HTML.",
+                )
+            )
+
+    landing_records = parse_puro_earth_landing(landing_soup, landing_response.url)
+    metrics["pe_landing_methodologies_seen"] = len(landing_records)
+    if not landing_records:
+        errors.append(
+            make_extraction_error(
+                "Puro Earth",
+                landing_response.url,
+                "page_structure_changed",
+                "Puro Earth methodologies landing page exposed no H3 methodology cards with 'learn more' detail links.",
+                "Open the source page and update the landing-page card selector.",
+            )
+        )
+        return [], errors, metrics
+
+    library_response, library_error = fetch_public_source(
+        PURO_EARTH_DOCUMENT_LIBRARY_URL, "Puro Earth", allow_insecure_ssl
+    )
+    library_soup = None
+    library_sections: list[dict] = []
+    if library_error:
+        metrics["pe_document_library_fetch_failed"] = 1
+        errors.append(library_error)
+    else:
+        library_soup = BeautifulSoup(library_response.text, "html.parser")
+        library_sections = collect_puro_earth_library_sections(library_soup, library_response.url)
+        metrics["pe_library_pdfs_seen"] = sum(len(section["pdfs"]) for section in library_sections)
+
+    # Build a lookup from methodology name key → collected PDFs (with section H2).
+    library_by_key: dict[str, list[dict]] = {}
+    programme_pdfs: list[dict] = []
+    for section in library_sections:
+        section_h2_l = (section.get("section") or "").lower()
+        heading = section.get("heading") or ""
+        key = puro_earth_normalize_name(heading)
+        if any(marker in section_h2_l for marker in PURO_EARTH_PROGRAMME_H2_MARKERS):
+            for pdf in section["pdfs"]:
+                programme_pdfs.append({"section": section["section"], "heading": heading, **pdf})
+            continue
+        if not any(marker in section_h2_l for marker in PURO_EARTH_LIBRARY_H2_MARKERS):
+            # Sections that fall outside the two H2s we care about are ignored to avoid
+            # picking up navigation-heading noise.
+            continue
+        if key:
+            library_by_key.setdefault(key, []).extend(section["pdfs"])
+
+    candidates: list[dict] = []
+    seen_dedupe_keys: set[tuple[str, str, str]] = set()
+    for record in landing_records:
+        methodology_title = record["title"]
+        key = puro_earth_normalize_name(methodology_title)
+        primary_url = ""
+        version = ""
+        supporting: list[dict] = []
+        # Match library PDFs to this methodology by its normalized H3 name, including
+        # fuzzy substring matches so partial-name headings still contribute PDFs.
+        library_hits: list[dict] = list(library_by_key.get(key, []))
+        for heading_key, pdfs in library_by_key.items():
+            if heading_key == key or not key:
+                continue
+            if key in heading_key or heading_key in key:
+                for pdf in pdfs:
+                    if pdf not in library_hits:
+                        library_hits.append(pdf)
+
+        # Rank matching PDFs and pick the highest-scoring one as primary. A PDF
+        # is "primary-eligible" if its filename/anchor mentions the methodology
+        # title (after URL-decoding) and does not look like a transition plan,
+        # clarification, or public consultation draft.
+        eligible = [
+            pdf for pdf in library_hits
+            if is_puro_earth_methodology_pdf(pdf["text"], pdf["href"], methodology_title)
+        ]
+        if eligible:
+            best = max(eligible, key=lambda pdf: score_puro_earth_primary_pdf(pdf["text"], pdf["href"]))
+            primary_url = best["url"]
+            version = parse_puro_earth_edition(best["text"], best["href"])
+
+        # Emit any remaining PDFs from the same section as supporting docs.
+        for pdf in library_hits:
+            if pdf["url"] == primary_url:
+                continue
+            stage = classify_puro_earth_pdf(pdf["text"], pdf["href"], methodology_title)
+            supporting_notes = (
+                f"Puro Earth supporting document for '{methodology_title}' "
+                f"(stage: {stage}); body not parsed."
+            )
+            candidate = make_candidate(
+                profile,
+                "",
+                pdf["text"] or pdf["url"],
+                "supporting_document",
+                methodology_title,
+                parse_puro_earth_edition(pdf["text"], pdf["href"]),
+                "",
+                record["detail_url"] or landing_response.url,
+                pdf["url"],
+                "puro_earth_library_document",
+                "medium",
+                supporting_notes,
+            )
+            candidate["candidate_type"] = "supporting_document"
+            candidate["classification_reason"] = f"Puro Earth methodology supporting document ({stage})."
+            candidate["notes"] = append_note(candidate["notes"], f"evidence_stage: {stage}")
+            supporting.append(candidate)
+            metrics["pe_supporting_documents"] += 1
+
+        candidates.extend(supporting)
+
+        dedupe_key = (
+            key,
+            (version or "").lower(),
+            (primary_url or "").lower(),
+        )
+        if dedupe_key in seen_dedupe_keys:
+            continue
+        seen_dedupe_keys.add(dedupe_key)
+
+        rich_notes = (
+            "Extracted from the Puro.earth methodologies landing + document library; "
+            "linked PDFs are captured but not fully parsed."
+        )
+        rich_notes = append_note(rich_notes, f"category: {methodology_title}")
+        rich_notes = append_note(rich_notes, f"removal_type: {methodology_title}")
+        if version:
+            rich_notes = append_note(rich_notes, f"version: {version}")
+        rich_notes = append_note(rich_notes, "status: Live (published on Puro Standard document library)")
+        if not primary_url:
+            rich_notes = append_note(rich_notes, "primary PDF not identified in document library; reviewer should confirm.")
+            errors.append(
+                make_extraction_error(
+                    "Puro Earth",
+                    record["detail_url"] or landing_response.url,
+                    "document_link_missing",
+                    f"No primary PDF was matched for '{methodology_title}' in the Puro.earth document library.",
+                    "Confirm the current methodology PDF filename or update the anchor-matching heuristic.",
+                )
+            )
+            metrics["pe_primary_pdf_missing"] += 1
+        else:
+            metrics["pe_primary_pdf_attached"] += 1
+
+        confidence = "high" if primary_url and version else "medium" if primary_url else "low"
+        candidate = make_candidate(
+            profile,
+            "",
+            methodology_title,
+            "methodology",
+            methodology_title,
+            version,
+            "Live",
+            landing_response.url,
+            primary_url,
+            "puro_earth_landing_plus_library",
+            confidence,
+            rich_notes,
+        )
+        candidate["candidate_type"] = "methodunit_candidate"
+        candidate["classification_reason"] = f"Puro Earth methodology card ({methodology_title})."
+        candidates.append(candidate)
+        metrics["pe_records_found"] += 1
+
+    # Emit programme-level docs from "Multi-program requirements" as extra supporting rows.
+    for pdf in programme_pdfs:
+        candidate = make_candidate(
+            profile,
+            "",
+            pdf["text"] or pdf["url"],
+            "supporting_document",
+            "",
+            parse_puro_earth_edition(pdf["text"], pdf["href"]),
+            "",
+            landing_response.url,
+            pdf["url"],
+            "puro_earth_programme_document",
+            "medium",
+            (
+                f"Puro Earth programme-level document ({pdf['section']} / {pdf['heading']}); "
+                "linked to the Puro Standard rather than a single methodology."
+            ),
+        )
+        candidate["candidate_type"] = "supporting_document"
+        candidate["classification_reason"] = "Puro Earth programme-level standard/requirement document."
+        candidate["notes"] = append_note(candidate["notes"], "evidence_stage: programme_requirement")
+        candidates.append(candidate)
+        metrics["pe_programme_documents"] += 1
 
     return dedupe_candidates(candidates), errors, metrics
 
