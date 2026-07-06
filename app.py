@@ -50,6 +50,7 @@ from pipeline import (
     normalize_columns,
     normalize_text,
     pretty_label,
+    programme_key,
     run_candidate_extractors,
     save_timestamped_outputs,
     save_review_decisions,
@@ -803,9 +804,21 @@ def selected_field_rows(field_text: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def compact_roadmap_table(matrix: pd.DataFrame) -> pd.DataFrame:
+def built_programme_keys() -> set[str]:
+    """Return normalized keys for every programme that has a working extractor or source-resolution routine."""
+    return {programme_key(name) for name in list(SUPPORTED_EXTRACTORS) + list(SOURCE_RESOLUTION_SOURCES)}
+
+
+def split_roadmap_by_built(matrix: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return (built, next_to_build) DataFrames derived from the connector-source matrix.
+
+    Rows are matched to built connectors by ``programme_key`` so subtle name
+    differences ("American Carbon Registry / ACR" vs "American Carbon Registry
+    (ACR)") still collapse to the same key.
+    """
+    empty = pd.DataFrame(columns=["Programme", "Priority", "Source pattern", "Connector approach", "Next action"])
     if matrix.empty:
-        return pd.DataFrame(columns=["Programme", "Priority", "Source pattern", "Connector approach", "Next action"])
+        return empty, empty
     view = connector_matrix_view(matrix)
     if "recommended_order" in view.columns:
         order = pd.to_numeric(view["recommended_order"], errors="coerce")
@@ -818,7 +831,17 @@ def compact_roadmap_table(matrix: pd.DataFrame) -> pd.DataFrame:
         "next_action": "Next action",
     }
     compact = select_existing(view, list(columns.keys())).rename(columns=columns)
-    return compact.head(12)
+    if compact.empty or "Programme" not in compact.columns:
+        return empty, compact
+    built_keys = built_programme_keys()
+    is_built = compact["Programme"].astype(str).map(lambda name: programme_key(name) in built_keys)
+    return compact[is_built].copy(), compact[~is_built].copy()
+
+
+def compact_roadmap_table(matrix: pd.DataFrame) -> pd.DataFrame:
+    """Return the top of the roadmap. Kept for callers that still expect a single table."""
+    _built, next_to_build = split_roadmap_by_built(matrix)
+    return next_to_build.head(12)
 
 
 def methodunit_dossier_page(data: dict[str, pd.DataFrame]) -> None:
@@ -953,7 +976,7 @@ def programme_intelligence_page(data: dict[str, pd.DataFrame]) -> None:
             break
     selected_programme = st.selectbox("Programme", programmes, index=default_index, key="programme_intelligence_select")
     st.caption(
-        "Try these examples: **American Carbon Registry (ACR)**, **Climate Forward**, **Social Carbon**, **Artisan C-sink**."
+        "Try these examples: **American Carbon Registry (ACR)**, **Climate Forward**, **Social Carbon**, **Plan Vivo**, **Artisan C-sink**."
     )
 
     profiles = data.get("source_profiles", pd.DataFrame())
@@ -2155,9 +2178,20 @@ def overview_page(data: dict[str, pd.DataFrame]) -> None:
 
     st.subheader("Current Priorities")
     matrix = data.get("connector_source_matrix", pd.DataFrame())
-    priorities = compact_roadmap_table(matrix)
-    if priorities.empty:
+    built_now = list(SUPPORTED_EXTRACTORS) + list(SOURCE_RESOLUTION_SOURCES)
+    st.caption(
+        "**Already built ({count}):** {names}.".format(
+            count=len(built_now),
+            names=", ".join(built_now),
+        )
+    )
+    _built_matrix, next_to_build = split_roadmap_by_built(matrix)
+    if next_to_build.empty:
         priorities = connector_priority_rows(data, plan)
+        st.caption("Showing broader connector priorities from the source registry (matrix has no un-built rows).")
+    else:
+        priorities = next_to_build
+        st.caption("Next to build (from the researched connector matrix, built connectors filtered out):")
     st.dataframe(priorities, hide_index=True, use_container_width=True)
 
     st.subheader("Platform Workflow")
@@ -2401,6 +2435,7 @@ def explore_source_page(data: dict[str, pd.DataFrame]) -> None:
         st.write("- **Climate Forward** — simple static table.")
         st.write("- **American Carbon Registry / ACR** — catalogue + detail pages + PDFs.")
         st.write("- **Social Carbon** — coded detail pages + version history.")
+        st.write("- **Plan Vivo** — compact approved-methodology cards (PM001/PM002).")
         st.write("- **Artisan C-sink** — source-resolution case (no clean methodology page).")
 
     default_source_context = {
@@ -2713,12 +2748,26 @@ def connector_roadmap_platform_page(data: dict[str, pd.DataFrame]) -> None:
         ]
     )
 
-    st.subheader("Recommended Build Sequence")
-    compact = compact_roadmap_table(matrix)
-    if compact.empty:
-        st.info("No source-intelligence matrix is loaded yet.")
+    built_matrix, next_to_build = split_roadmap_by_built(matrix)
+    st.subheader("Already Built")
+    built_now = list(SUPPORTED_EXTRACTORS) + list(SOURCE_RESOLUTION_SOURCES)
+    st.caption(
+        f"{len(built_now)} programme(s) have a working extractor or source-resolution routine: "
+        + ", ".join(built_now)
+    )
+    if not built_matrix.empty:
+        st.caption("Of those, the following are also present in the researched connector matrix:")
+        st.dataframe(built_matrix, hide_index=True, use_container_width=True)
+
+    st.subheader("Next to Build")
+    if next_to_build.empty:
+        if matrix.empty:
+            st.info("No source-intelligence matrix is loaded yet.")
+        else:
+            st.info("Every researched connector in the matrix has been built.")
     else:
-        st.dataframe(compact, hide_index=True, use_container_width=True)
+        st.caption("Researched connector candidates that do not yet have an extractor in this app.")
+        st.dataframe(next_to_build, hide_index=True, use_container_width=True)
 
     if not view.empty:
         readiness_text = combined_text(view, ["verification_needed", "next_action", "implementation_note"])

@@ -75,6 +75,8 @@ Source-specific extractors are small, source-aware ingestion routines — not on
 
 ## Currently Supported Source-Specific Extractors
 
+The app currently ships **eight** working source-specific extractors plus **one** source-resolution routine (Artisan C-sink) — nine sources total, all reachable from the Source Explorer dropdown:
+
 - **Climate Action Reserve** — working structured-table extraction.
 - **International Carbon Registry / ICR** — discovery-only; M-ICR codes and detail URLs found, but titles require manual review.
 - **Asia Carbon Institute** — source-access / SSL exception handling; not bypassed by default.
@@ -84,7 +86,11 @@ Source-specific extractors are small, source-aware ingestion routines — not on
 - **Social Carbon** — card-layout index scanner (no `<table>`) that detects each `SCM####:` methodology heading, resolves its `/scm####` detail URL, and follows it. On the detail page the current PDF is identified via the top `View Methodology` anchor; status is parsed from the `Status: Live/Inactive since <date>` line; the `Modules / Key Sources` block and `Version History.` H4 chain are captured into `notes` (labelled `sector:`, `modules:`, `version_history:` — none of these have first-class schema columns). Historical version PDFs, public-comment PDFs, feasibility templates, VVB checklists, and any board/sunset decision documents are captured as supporting documents with evidence-stage tags. Inactive methodologies (currently SCM0001) are still ingested with `status = Inactive since <date>` — reviewers decide whether to keep them.
 - **Plan Vivo** — single-page article scanner for the PV Climate approved-methodologies page (no detail pages, no `<table>`). Iterates leaf `<article>` blocks — skipping the outer wrapper article — to detect each `PM###` methodology, extracting title, description, and a `Status: … Type: … Version …: PM### V… | Assessment Report (Active from: …) Developer: … Reviewers: …` metadata line. The primary PDF is chosen from the S3-hosted `PM### V#.#` / `View PM###` anchors; the paired assessment / review report is captured as a supporting document tagged `evidence_stage: assessment`. Non-schema fields (`type`, `active_from`, `developer`, `reviewers`, `description`) are stored in `notes` with labels. Uses the verified `/projects/certify-a-project/pvclimate/methodologies/approved-methodologies` URL exclusively — the deprecated technical-library path is not consulted.
 
-Other programmes appear in Home, Programme Intelligence, and Connector Roadmap views but do not yet have implemented extractors.
+Plus one source-resolution routine:
+
+- **Artisan C-sink** — no clean methodology index; the routine captures a document-family record, preserves clarification documents, and logs missing/unstable document links as issues. Selectable from the Source Explorer dropdown alongside the eight extractors.
+
+Other programmes appear in Home, Programme Intelligence, and Connector Roadmap views but do not yet have implemented extractors — the researched candidates awaiting a connector are listed under Connector Roadmap → "Next to Build" (Cercarbono, Puro Earth, BioCarbon Registry, ART/TREES, Isometric, Credible Carbon).
 
 ## Source Resolution
 
@@ -188,12 +194,32 @@ The Review Desk -> Exports tab can write timestamped files to `outputs/`, includ
 - `source_registry_YYYYMMDD_HHMMSS.csv`
 - `qa_flags_YYYYMMDD_HHMMSS.csv`
 
+### Latest Demo Package
+
+`scripts/generate_demo_outputs.py` regenerates `outputs/demo_latest/` from the eight extractors currently wired to the demo (CAR, City Forest Credits, Climate Forward, ACR, Social Carbon, Plan Vivo, and the Artisan C-sink source-resolution routine). At the current head, the regenerated demo produces:
+
+| Source | Records | Total links | Issues |
+|---|---:|---:|---:|
+| Climate Action Reserve | 33 | 150 | 0 |
+| City Forest Credits | 33 | 65 | 0 |
+| Climate Forward | 7 | 68 | 0 |
+| American Carbon Registry (ACR) | 13 | 177 | 0 |
+| Social Carbon | 11 | 63 | 0 |
+| Plan Vivo | 2 | 4 | 0 |
+| Artisan C-sink | 1 | 28 | 0 |
+
+Aggregated CSV row counts:
+
+- `methodunit_candidates_review.csv` — **100** rows
+- `extracted_source_links_full.csv` — **555** rows
+- `source_documents.csv` — **528** rows
+- `extraction_errors.csv` — **0** rows
+- `source_resolution_results.csv` — 1 row
+
 ## Next Development Priorities
 
-1. Repair or confirm stale source-registry URLs before building more extractors.
-2. Follow the Connector Roadmap and verification plan to pick the next extractor.
-3. Add Plan Vivo and Climate Forward as the next controlled extractors.
-4. Add the next stable HTML catalogue extractor (likely ACR after URL repair).
-5. Add controlled PDF metadata extraction for document-first sources.
-6. Prototype a bounded AI-assist step for one messy case (for example, ICR title suggestions from detail-page text).
-7. Add catalogue import validation once the extracted-record and review-decision schemas stabilize.
+1. Repair or confirm remaining stale source-registry URLs before building more extractors.
+2. Follow the Connector Roadmap → "Next to Build" list — Cercarbono, Puro Earth, BioCarbon Registry, ART/TREES, Isometric, Credible Carbon are the researched candidates whose extractors are not yet implemented.
+3. Add controlled PDF metadata extraction for document-first sources.
+4. Prototype a bounded AI-assist step for one messy case (for example, ICR title suggestions from detail-page text).
+5. Add catalogue import validation once the extracted-record and review-decision schemas stabilize.
