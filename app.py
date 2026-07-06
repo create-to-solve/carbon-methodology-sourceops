@@ -72,10 +72,8 @@ from extractors import (
 
 APP_TITLE = "Carbon Methodology Extraction Workbench"
 
-PUBLIC_EXTRACTORS = [
+STABLE_EXTRACTORS = [
     "Climate Action Reserve",
-    "International Carbon Registry / ICR",
-    "Asia Carbon Institute",
     "City Forest Credits",
     "Climate Forward",
     "American Carbon Registry / ACR",
@@ -87,10 +85,18 @@ PUBLIC_EXTRACTORS = [
     "ART/TREES",
 ]
 
+EXPERIMENTAL_EXTRACTORS = [
+    "International Carbon Registry / ICR",
+    "Asia Carbon Institute",
+]
+
+PUBLIC_EXTRACTORS = STABLE_EXTRACTORS + EXPERIMENTAL_EXTRACTORS
+
 LATEST_SAVED_OUTPUT_DIR = "outputs/demo_latest"
 
 DEMO_METRICS = {
-    "extractors": 12,
+    "stable_extractors": 10,
+    "experimental_checks": 2,
     "methodology_records": 145,
     "source_links": 704,
     "source_documents": 677,
@@ -346,11 +352,15 @@ def update_check_errors() -> pd.DataFrame:
 
 
 def records_for_workbench() -> tuple[pd.DataFrame, str]:
+    saved = latest_saved_records()
     if st.session_state.get("update_check_status") == "success":
         updated = update_check_records()
+        update_source = st.session_state.get("update_check_source", "")
         if not updated.empty:
-            return updated, "updated results from this session"
-    saved = latest_saved_records()
+            if not saved.empty and update_source:
+                saved = saved[~saved["program_name"].astype(str).apply(lambda value: source_matches(value, update_source))]
+            combined = pd.concat([saved, updated], ignore_index=True)
+            return add_record_readiness(combined), "latest saved extraction package plus update-check results"
     if not saved.empty:
         return saved, "latest saved extraction package"
     records, source_label = session_or_output(
@@ -363,11 +373,14 @@ def records_for_workbench() -> tuple[pd.DataFrame, str]:
 
 
 def links_for_workbench() -> tuple[pd.DataFrame, str]:
+    saved = latest_saved_links()
     if st.session_state.get("update_check_status") == "success":
         updated = update_check_links()
+        update_source = st.session_state.get("update_check_source", "")
         if not updated.empty:
-            return updated, "updated results from this session"
-    saved = latest_saved_links()
+            if not saved.empty and update_source:
+                saved = saved[~saved["program_name"].astype(str).apply(lambda value: source_matches(value, update_source))]
+            return pd.concat([saved, updated], ignore_index=True), "latest saved extraction package plus update-check results"
     if not saved.empty:
         return saved, "latest saved extraction package"
     return session_or_output(
@@ -2457,7 +2470,8 @@ def overview_page(data: dict[str, pd.DataFrame]) -> None:
 
     metric_row(
         [
-            ("Full extractors", DEMO_METRICS["extractors"]),
+            ("Stable extractors", DEMO_METRICS["stable_extractors"]),
+            ("Experimental checks", DEMO_METRICS["experimental_checks"]),
             ("Extracted records", DEMO_METRICS["methodology_records"]),
             ("Evidence/source links", DEMO_METRICS["source_links"]),
             ("Extraction errors", DEMO_METRICS["errors"]),
@@ -2465,8 +2479,12 @@ def overview_page(data: dict[str, pd.DataFrame]) -> None:
     )
 
     st.subheader("Supported Sources")
-    source_rows = [{"Full extractor": source} for source in PUBLIC_EXTRACTORS]
-    st.dataframe(pd.DataFrame(source_rows), hide_index=True, use_container_width=True, height=430)
+    stable_rows = [{"Stable extractor": source} for source in STABLE_EXTRACTORS]
+    st.dataframe(pd.DataFrame(stable_rows), hide_index=True, use_container_width=True, height=360)
+    st.subheader("Experimental Source Checks")
+    st.caption("These are included for source-access testing and may not have saved records in the current package.")
+    experimental_rows = [{"Experimental source check": source} for source in EXPERIMENTAL_EXTRACTORS]
+    st.dataframe(pd.DataFrame(experimental_rows), hide_index=True, use_container_width=True, height=110)
 
     st.subheader("What the App Does")
     st.write("- Finds public methodology/standards pages")
@@ -3222,8 +3240,20 @@ def extract_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Extract")
     st.write("Choose a source to view the latest saved extraction, then optionally check the public source for updates.")
 
-    source = st.selectbox("Carbon standard / registry", PUBLIC_EXTRACTORS, key="extract_source_select")
+    default_source = "American Carbon Registry / ACR"
+    default_index = PUBLIC_EXTRACTORS.index(default_source) if default_source in PUBLIC_EXTRACTORS else 0
+    source = st.selectbox(
+        "Carbon standard / registry",
+        PUBLIC_EXTRACTORS,
+        index=default_index,
+        key="extract_source_select",
+    )
     profile = SOURCE_PROFILES.get(source, {})
+    is_experimental = source in EXPERIMENTAL_EXTRACTORS
+    if is_experimental:
+        st.caption(
+            "Experimental source check: this source may not have saved records and live checks may depend on source access."
+        )
 
     st.subheader("Source Profile")
     profile_rows = [
@@ -3271,17 +3301,35 @@ def extract_page(data: dict[str, pd.DataFrame]) -> None:
             st.caption("Displaying updated results from this session.")
     elif update_failed:
         if saved_records.empty:
-            st.info(f"No saved extraction is available for {source}.")
+            if is_experimental:
+                st.info(f"No saved extraction is available for this experimental source.")
+            else:
+                st.info(f"No saved extraction is available for {source}.")
             st.warning("Update check could not complete.")
             if has_ssl_or_access_issue(update_errors):
-                st.warning("This appears to be a source access or SSL certificate issue.")
+                if source == "Asia Carbon Institute":
+                    st.warning(
+                        "This appears to be a source-access or SSL certificate issue. "
+                        "The source may require manual verification or connector configuration."
+                    )
+                else:
+                    st.warning("This appears to be a source access or SSL certificate issue.")
         else:
             st.warning("Update check could not complete. Showing latest saved records instead.")
             if has_ssl_or_access_issue(update_errors):
-                st.warning("This appears to be a source access or SSL certificate issue.")
+                if source == "Asia Carbon Institute":
+                    st.warning(
+                        "This appears to be a source-access or SSL certificate issue. "
+                        "The source may require manual verification or connector configuration."
+                    )
+                else:
+                    st.warning("This appears to be a source access or SSL certificate issue.")
     elif saved_records.empty:
-        st.info(f"No saved extraction is available for {source}.")
-        st.caption("Use Check for updates to test the live source.")
+        if is_experimental:
+            st.info("No saved extraction is available for this experimental source. Use Check for updates to test the live source.")
+        else:
+            st.info(f"No saved extraction is available for {source}.")
+            st.caption("Use Check for updates to test the live source.")
     else:
         st.success(f"Showing latest extracted records for {source}.")
 
@@ -3439,6 +3487,11 @@ def review_page(data: dict[str, pd.DataFrame]) -> None:
 
 def about_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("About")
+
+    st.write(
+        "The app currently includes 10 stable extractors and 2 experimental source checks. "
+        "Experimental checks are useful for testing access patterns, but they are not part of the stable saved package."
+    )
 
     st.subheader("Why This Is Difficult")
     st.write(

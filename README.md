@@ -75,11 +75,11 @@ Source-specific extractors are small, source-aware ingestion routines — not on
 
 ## Currently Supported Source-Specific Extractors
 
-The app currently ships **twelve** working source-specific extractors plus **one** source-resolution routine (Artisan C-sink) — thirteen sources total, all reachable from the Source Explorer dropdown:
+The public Extract page currently presents **10 stable extractors** plus **2 experimental source checks**. The source-resolution routine for Artisan C-sink is retained outside the public Extract flow for internal diagnostics and package generation.
+
+Stable extractors:
 
 - **Climate Action Reserve** — working structured-table extraction.
-- **International Carbon Registry / ICR** — discovery-only; M-ICR codes and detail URLs found, but titles require manual review.
-- **Asia Carbon Institute** — source-access / SSL exception handling; not bypassed by default.
 - **City Forest Credits** — document / protocol-family extraction; linked PDFs are discovered but not fully parsed.
 - **Climate Forward** — forecast-methodology table parser with per-methodology detail-page follow-through; captures title, version, date issued, development status, detail URL and primary PDF for each forecast methodology, and preserves per-methodology supporting PDFs (public comments, summaries, errata) plus program-level document links (screening form, template, agreement, approval manual) as supporting documents. First connector implemented from the research → verification → connector workflow.
 - **American Carbon Registry (ACR)** — approved-methodology table parser with per-methodology detail-page follow-through; captures ANAB sectoral scope, title, version, detail URL and the current approved PDF (identified via the `Download the methodology` anchor) for each row. Historical PDFs under `Previous Approved Versions` are preserved as supporting documents tagged `evidence_stage: historical_version` and are never attached as the primary document; process-documentation PDFs (peer review, public comments, summaries of changes) and reference documents (ERT calculators, `.xlsx` templates) are captured with appropriate stage tags. Detail-page fetch failures log per-methodology errors without dropping the index row.
@@ -90,9 +90,14 @@ The app currently ships **twelve** working source-specific extractors plus **one
 - **BioCarbon Registry (BCR)** — single-page card scanner for the public AFOLU sector page (no detail pages, no `<table>`). Iterates every `<h3>` matching `BCR####`, walks up the nested Elementor row containers to find the sibling widget holding the card's PDF anchors, and picks the "Methodological Document" anchor as the primary PDF. "Public Consultation Results/Document" PDFs, "Previous Versions" `.zip` bundles, and "Guidelines…" PDFs are captured as supporting documents tagged with matching evidence stages. A sibling "Coastal Ecosystems" card without a BCR code but linking to a CDM `AR-AM0014` PDF is emitted as `unit_type = "adopted_external_method"` with the CDM code extracted from the filename and a labelled `adopted_external_methodology` note. Sector (`AFOLU Sector`) is stored in `notes` since `CANDIDATE_SCHEMA` has no sector column dedicated to the H1 label. Uses the verified `https://biocarbonstandard.com/en/afolu/` URL exclusively — the JS-heavy `biocarbonregistry.com` domain is not consulted.
 - **Plan Vivo** — single-page article scanner for the PV Climate approved-methodologies page (no detail pages, no `<table>`). Iterates leaf `<article>` blocks — skipping the outer wrapper article — to detect each `PM###` methodology, extracting title, description, and a `Status: … Type: … Version …: PM### V… | Assessment Report (Active from: …) Developer: … Reviewers: …` metadata line. The primary PDF is chosen from the S3-hosted `PM### V#.#` / `View PM###` anchors; the paired assessment / review report is captured as a supporting document tagged `evidence_stage: assessment`. Non-schema fields (`type`, `active_from`, `developer`, `reviewers`, `description`) are stored in `notes` with labels. Uses the verified `/projects/certify-a-project/pvclimate/methodologies/approved-methodologies` URL exclusively — the deprecated technical-library path is not consulted.
 
-Plus one source-resolution routine:
+Experimental source checks:
 
-- **Artisan C-sink** — no clean methodology index; the routine captures a document-family record, preserves clarification documents, and logs missing/unstable document links as issues. Selectable from the Source Explorer dropdown alongside the nine extractors.
+- **International Carbon Registry / ICR** — included for source-access testing; update checks may find M-ICR codes and detail URLs, but no saved records are included in the current package.
+- **Asia Carbon Institute** — included for source-access testing; update checks can fail due to SSL/certificate/source-access behavior and may require manual verification or connector configuration.
+
+Source-resolution routine retained outside the public Extract flow:
+
+- **Artisan C-sink** — no clean methodology index; the routine captures a document-family record, preserves clarification documents, and logs missing/unstable document links as issues.
 
 Other programmes appear in Home, Programme Intelligence, and Connector Roadmap views but do not yet have implemented extractors — the researched candidates awaiting a connector are listed under Connector Roadmap → "Next to Build" (Isometric, Credible Carbon).
 
@@ -198,9 +203,9 @@ The Review Desk -> Exports tab can write timestamped files to `outputs/`, includ
 - `source_registry_YYYYMMDD_HHMMSS.csv`
 - `qa_flags_YYYYMMDD_HHMMSS.csv`
 
-### Latest Demo Package
+### Latest Saved Extraction Package
 
-`scripts/generate_demo_outputs.py` regenerates `outputs/demo_latest/` from the extractors currently wired to the demo (CAR, City Forest Credits, Climate Forward, ACR, Social Carbon, Plan Vivo, BioCarbon Registry, Cercarbono, Puro Earth, ART/TREES, and the Artisan C-sink source-resolution routine). At the current head, the regenerated demo produces:
+`scripts/generate_demo_outputs.py` regenerates `outputs/demo_latest/` from the 10 stable extractors (CAR, City Forest Credits, Climate Forward, ACR, Social Carbon, Plan Vivo, BioCarbon Registry, Cercarbono, Puro Earth, ART/TREES) plus the Artisan C-sink source-resolution routine retained outside the public Extract flow. The 2 experimental source checks (ICR and Asia Carbon Institute) are available for update/access testing but are not part of the stable saved package. At the current head, the regenerated package produces:
 
 | Source | Records | Total links | Issues |
 |---|---:|---:|---:|
