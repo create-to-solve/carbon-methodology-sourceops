@@ -87,7 +87,7 @@ PUBLIC_EXTRACTORS = [
     "ART/TREES",
 ]
 
-DEMO_OUTPUT_DIR = "outputs/demo_latest"
+LATEST_SAVED_OUTPUT_DIR = "outputs/demo_latest"
 
 DEMO_METRICS = {
     "extractors": 12,
@@ -261,14 +261,14 @@ def show_dataframe(df: pd.DataFrame, key: str, height: int = 420) -> None:
     )
 
 
-def load_demo_csv(file_name: str, columns: list[str]) -> pd.DataFrame:
-    path = Path(__file__).parent / DEMO_OUTPUT_DIR / file_name
+def load_saved_csv(file_name: str, columns: list[str]) -> pd.DataFrame:
+    path = Path(__file__).parent / LATEST_SAVED_OUTPUT_DIR / file_name
     if not path.exists():
         return pd.DataFrame(columns=columns)
     try:
         return ensure_columns(normalize_columns(pd.read_csv(path, dtype=str).fillna("")), columns)
     except Exception as exc:  # noqa: BLE001 - visible app warning is more useful than failing the page.
-        st.warning(f"Could not load demo file {path}: {exc}")
+        st.warning(f"Could not load latest saved extraction file {path}: {exc}")
         return pd.DataFrame(columns=columns)
 
 
@@ -287,53 +287,72 @@ def records_for_source(records: pd.DataFrame, source: str) -> pd.DataFrame:
     return records[records["program_name"].astype(str).apply(lambda value: source_matches(value, source))].copy()
 
 
-def store_extraction_results(
+def store_update_check_results(
     candidates: pd.DataFrame,
     errors: pd.DataFrame,
     enrichment_metrics: dict,
-    result_mode: str,
     source: str,
-    sources_attempted: int = 1,
 ) -> None:
     prepared_candidates = apply_output_safeguards(ensure_columns(candidates, CANDIDATE_SCHEMA))
     prepared_errors = ensure_columns(errors, EXTRACTION_ERROR_SCHEMA)
-    st.session_state["candidate_extraction_results"] = prepared_candidates
+    selected_records = records_for_source(current_methodunit_rows(prepared_candidates), source)
+    update_succeeded = not selected_records.empty or prepared_errors.empty
+    st.session_state["update_check_results"] = prepared_candidates
+    st.session_state["update_check_errors"] = prepared_errors
+    st.session_state["update_check_enrichment_metrics"] = enrichment_metrics
+    st.session_state["update_check_source"] = source
+    st.session_state["update_check_status"] = "success" if update_succeeded else "failed"
+    st.session_state["candidate_extraction_results"] = prepared_candidates if update_succeeded else pd.DataFrame(columns=CANDIDATE_SCHEMA)
     st.session_state["candidate_extraction_errors"] = prepared_errors
     st.session_state["candidate_extraction_enrichment_metrics"] = enrichment_metrics
-    st.session_state["candidate_extraction_sources_attempted"] = sources_attempted
+    st.session_state["candidate_extraction_sources_attempted"] = 1
     st.session_state["source_resolution_last_run"] = ""
-    st.session_state["extract_result_mode"] = result_mode
-    st.session_state["extract_result_source"] = source
-    st.session_state["demo_source_last_run"] = source if result_mode == "live" else "Demo extraction package"
+    st.session_state["demo_source_last_run"] = source
 
 
-def load_demo_extraction_into_session() -> None:
-    candidates = load_demo_csv("extracted_source_links_full.csv", CANDIDATE_SCHEMA)
-    methodunits = load_demo_csv("methodunit_candidates_review.csv", CANDIDATE_SCHEMA)
-    errors = load_demo_csv("extraction_errors.csv", EXTRACTION_ERROR_SCHEMA)
-    store_extraction_results(
-        candidates if not candidates.empty else methodunits,
-        errors,
-        {},
-        "demo",
-        "Demo extraction package",
-        sources_attempted=len(PUBLIC_EXTRACTORS),
+def current_methodunit_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    prepared = apply_output_safeguards(ensure_columns(rows, CANDIDATE_SCHEMA))
+    if prepared.empty or "candidate_type" not in prepared.columns:
+        return pd.DataFrame(columns=CANDIDATE_SCHEMA)
+    return prepared[prepared["candidate_type"].eq("methodunit_candidate")].copy()
+
+
+def latest_saved_records() -> pd.DataFrame:
+    return add_record_readiness(apply_output_safeguards(load_saved_csv("methodunit_candidates_review.csv", CANDIDATE_SCHEMA)))
+
+
+def latest_saved_links() -> pd.DataFrame:
+    links = load_saved_csv("extracted_source_links_full.csv", CANDIDATE_SCHEMA)
+    records = load_saved_csv("methodunit_candidates_review.csv", CANDIDATE_SCHEMA)
+    return apply_output_safeguards(links if not links.empty else records)
+
+
+def latest_saved_errors() -> pd.DataFrame:
+    return load_saved_csv("extraction_errors.csv", EXTRACTION_ERROR_SCHEMA)
+
+
+def update_check_records() -> pd.DataFrame:
+    return add_record_readiness(current_methodunit_rows(st.session_state.get("update_check_results", pd.DataFrame(columns=CANDIDATE_SCHEMA))))
+
+
+def update_check_links() -> pd.DataFrame:
+    return apply_output_safeguards(
+        ensure_columns(st.session_state.get("update_check_results", pd.DataFrame(columns=CANDIDATE_SCHEMA)), CANDIDATE_SCHEMA)
     )
-    st.session_state["source_exploration_summary"] = {
-        "Source": "Demo extraction package",
-        "Source status": "loaded",
-        "MethodUnit records found": len(methodunits),
-        "Supporting links found": max(len(candidates) - len(methodunits), 0),
-        "Issues logged": len(errors),
-        "Mode used": "demo_output_load",
-        "Recommended next action": "Review records and export approved decisions.",
-    }
+
+
+def update_check_errors() -> pd.DataFrame:
+    return ensure_columns(st.session_state.get("update_check_errors", pd.DataFrame(columns=EXTRACTION_ERROR_SCHEMA)), EXTRACTION_ERROR_SCHEMA)
 
 
 def records_for_workbench() -> tuple[pd.DataFrame, str]:
-    session_records = current_methodunit_candidates()
-    if not session_records.empty:
-        return add_record_readiness(session_records), "current session"
+    if st.session_state.get("update_check_status") == "success":
+        updated = update_check_records()
+        if not updated.empty:
+            return updated, "updated results from this session"
+    saved = latest_saved_records()
+    if not saved.empty:
+        return saved, "latest saved extraction package"
     records, source_label = session_or_output(
         pd.DataFrame(columns=CANDIDATE_SCHEMA),
         "methodunit_candidates_review.csv",
@@ -344,9 +363,13 @@ def records_for_workbench() -> tuple[pd.DataFrame, str]:
 
 
 def links_for_workbench() -> tuple[pd.DataFrame, str]:
-    session_links = current_extracted_links()
-    if not session_links.empty:
-        return session_links, "current session"
+    if st.session_state.get("update_check_status") == "success":
+        updated = update_check_links()
+        if not updated.empty:
+            return updated, "updated results from this session"
+    saved = latest_saved_links()
+    if not saved.empty:
+        return saved, "latest saved extraction package"
     return session_or_output(
         pd.DataFrame(columns=CANDIDATE_SCHEMA),
         "extracted_source_links_full.csv",
@@ -356,9 +379,12 @@ def links_for_workbench() -> tuple[pd.DataFrame, str]:
 
 
 def errors_for_workbench() -> tuple[pd.DataFrame, str]:
-    session_errors = current_extraction_errors()
-    if not session_errors.empty:
-        return session_errors, "current session"
+    update_errors = update_check_errors()
+    if not update_errors.empty:
+        return update_errors, "latest update check"
+    saved = latest_saved_errors()
+    if not saved.empty:
+        return saved, "latest saved extraction package"
     return session_or_output(
         pd.DataFrame(columns=EXTRACTION_ERROR_SCHEMA),
         "extraction_errors.csv",
@@ -376,7 +402,7 @@ def workbench_record_table(records: pd.DataFrame) -> pd.DataFrame:
                 "Version",
                 "Status",
                 "Unit type",
-                "Primary document URL",
+                "Primary document",
                 "Review status",
             ]
         )
@@ -388,10 +414,20 @@ def workbench_record_table(records: pd.DataFrame) -> pd.DataFrame:
             "Version": table.get("version", ""),
             "Status": table.get("status", ""),
             "Unit type": table.get("unit_type", ""),
-            "Primary document URL": table.get("document_url", ""),
+            "Primary document": table.get("document_url", ""),
             "Review status": table.get("review_status", ""),
         }
     )
+
+
+def has_ssl_or_access_issue(errors: pd.DataFrame) -> bool:
+    if errors.empty:
+        return False
+    issue_text = " ".join(
+        errors.get(column, pd.Series("", index=errors.index)).astype(str).str.lower().str.cat(sep=" ")
+        for column in ["error_type", "error_message", "suggested_action"]
+    )
+    return any(term in issue_text for term in ["ssl", "certificate", "access", "connection"])
 
 
 def supporting_documents_for_record(record: pd.Series, links: pd.DataFrame) -> pd.DataFrame:
@@ -2424,7 +2460,7 @@ def overview_page(data: dict[str, pd.DataFrame]) -> None:
             ("Full extractors", DEMO_METRICS["extractors"]),
             ("Extracted records", DEMO_METRICS["methodology_records"]),
             ("Evidence/source links", DEMO_METRICS["source_links"]),
-            ("Demo extraction errors", DEMO_METRICS["errors"]),
+            ("Extraction errors", DEMO_METRICS["errors"]),
         ]
     )
 
@@ -3184,7 +3220,7 @@ def method_about_page(data: dict[str, pd.DataFrame]) -> None:
 
 def extract_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Extract")
-    st.write("Choose a source, inspect its publishing pattern, then view demo records or run the live extractor.")
+    st.write("Choose a source to view the latest saved extraction, then optionally check the public source for updates.")
 
     source = st.selectbox("Carbon standard / registry", PUBLIC_EXTRACTORS, key="extract_source_select")
     profile = SOURCE_PROFILES.get(source, {})
@@ -3203,54 +3239,57 @@ def extract_page(data: dict[str, pd.DataFrame]) -> None:
     if profile.get("url"):
         st.link_button("Open primary source", profile["url"])
 
-    action_col_0, action_col_1 = st.columns(2, gap="small")
-    with action_col_0:
-        if st.button("View demo records", type="primary", key="extract_load_demo", use_container_width=True):
-            load_demo_extraction_into_session()
-    with action_col_1:
-        if st.button("Run live extraction", key="extract_run_selected", use_container_width=True):
-            with st.spinner(f"Running extractor for {source}..."):
-                candidates_df, errors_df, enrichment_metrics = run_candidate_extractors(
-                    [source],
-                    data.get("source_profiles", pd.DataFrame()),
-                )
-            store_extraction_results(candidates_df, errors_df, enrichment_metrics, "live", source)
+    if st.button("Check for updates", key="extract_check_updates"):
+        with st.spinner(f"Checking {source} for updates..."):
+            candidates_df, errors_df, enrichment_metrics = run_candidate_extractors(
+                [source],
+                data.get("source_profiles", pd.DataFrame()),
+            )
+        store_update_check_results(candidates_df, errors_df, enrichment_metrics, source)
 
-    records, records_source = records_for_workbench()
-    links, _links_source = links_for_workbench()
-    errors, _errors_source = errors_for_workbench()
-    filtered_records = records_for_source(records, source)
-    selected_links = records_for_source(links, source)
-    selected_errors = records_for_source(errors, source)
-    result_mode = st.session_state.get("extract_result_mode", "")
-    result_source = st.session_state.get("extract_result_source", "")
+    saved_records = records_for_source(latest_saved_records(), source)
+    saved_links = records_for_source(latest_saved_links(), source)
+    saved_errors = records_for_source(latest_saved_errors(), source)
+    update_source = st.session_state.get("update_check_source", "")
+    update_status = st.session_state.get("update_check_status", "")
+    update_is_for_source = bool(update_source) and source_matches(update_source, source)
+    update_records = records_for_source(update_check_records(), source) if update_is_for_source else pd.DataFrame(columns=CANDIDATE_SCHEMA)
+    update_links = records_for_source(update_check_links(), source) if update_is_for_source else pd.DataFrame(columns=CANDIDATE_SCHEMA)
+    update_errors = records_for_source(update_check_errors(), source) if update_is_for_source else pd.DataFrame(columns=EXTRACTION_ERROR_SCHEMA)
+    update_succeeded = update_is_for_source and update_status == "success"
+    update_failed = update_is_for_source and update_status == "failed"
+    display_records = update_records if update_succeeded else saved_records
+    display_links = update_links if update_succeeded else saved_links
+    display_errors = update_errors if update_is_for_source and not update_errors.empty else saved_errors
 
     st.subheader("Extracted Records")
-    if records.empty:
-        st.info("No records loaded yet. Choose a source and view demo records or run live extraction.")
-    elif result_mode == "demo":
-        if filtered_records.empty:
-            st.info("The demo package does not include records for this source.")
+    if update_succeeded:
+        st.success(f"Update check completed for {source}.")
+        if update_records.empty:
+            st.info("Update check completed, but no methodology/document records were found for this source.")
         else:
-            st.success(f"Showing demo records for {source}")
-    elif result_mode == "live" and source_matches(result_source, source):
-        if filtered_records.empty:
-            st.info("Extraction completed, but no methodology/document records were found for this source.")
+            st.caption("Displaying updated results from this session.")
+    elif update_failed:
+        if saved_records.empty:
+            st.info(f"No saved extraction is available for {source}.")
+            st.warning("Update check could not complete.")
+            if has_ssl_or_access_issue(update_errors):
+                st.warning("This appears to be a source access or SSL certificate issue.")
         else:
-            st.success(f"Showing live extraction results for {source}")
-    elif result_mode == "live":
-        st.info("No records loaded yet. Choose a source and view demo records or run live extraction.")
-    elif records_source != "none":
-        if filtered_records.empty:
-            st.info("No records loaded yet. Choose a source and view demo records or run live extraction.")
-        else:
-            st.success(f"Showing extracted records for {source}")
+            st.warning("Update check could not complete. Showing latest saved records instead.")
+            if has_ssl_or_access_issue(update_errors):
+                st.warning("This appears to be a source access or SSL certificate issue.")
+    elif saved_records.empty:
+        st.info(f"No saved extraction is available for {source}.")
+        st.caption("Use Check for updates to test the live source.")
+    else:
+        st.success(f"Showing latest extracted records for {source}.")
 
-    if filtered_records.empty:
+    if display_records.empty:
         pass
     else:
         st.dataframe(
-            workbench_record_table(filtered_records),
+            workbench_record_table(display_records),
             hide_index=True,
             use_container_width=True,
             height=440,
@@ -3263,8 +3302,8 @@ def extract_page(data: dict[str, pd.DataFrame]) -> None:
                 "Version": st.column_config.TextColumn("Version", width="small"),
                 "Status": st.column_config.TextColumn("Status", width="small"),
                 "Unit type": st.column_config.TextColumn("Unit type", width="small"),
-                "Primary document URL": st.column_config.LinkColumn(
-                    "Primary document URL",
+                "Primary document": st.column_config.LinkColumn(
+                    "Primary document",
                     display_text="Open",
                     width="small",
                 ),
@@ -3275,14 +3314,15 @@ def extract_page(data: dict[str, pd.DataFrame]) -> None:
     with st.expander("Advanced extraction details", expanded=False):
         metric_row(
             [
-                ("Extracted record count", len(filtered_records)),
-                ("Evidence/source-link count", len(selected_links)),
-                ("Extraction issue count", len(selected_errors)),
+                ("Saved record count", len(saved_records)),
+                ("Update-check record count", len(update_records) if update_is_for_source else 0),
+                ("Evidence/source-link count", len(display_links)),
+                ("Extraction issue count", len(display_errors)),
             ]
         )
-        if not selected_errors.empty:
+        if not display_errors.empty:
             show_dataframe(
-                select_existing(selected_errors, EXTRACTION_ERROR_SCHEMA),
+                select_existing(display_errors, EXTRACTION_ERROR_SCHEMA),
                 "extract_advanced_errors",
                 height=220,
             )
@@ -3295,10 +3335,7 @@ def review_page(data: dict[str, pd.DataFrame]) -> None:
     records, records_source = records_for_workbench()
     links, _links_source = links_for_workbench()
     if records.empty:
-        if st.button("View demo records", type="primary", key="review_load_demo"):
-            load_demo_extraction_into_session()
-            st.rerun()
-        st.info("Load the demo extraction or run an extractor before reviewing records.")
+        st.info("No extracted records are available yet. Use Extract to check a source for updates.")
         return
 
     source_options = ["All sources"] + [source for source in PUBLIC_EXTRACTORS if not records_for_source(records, source).empty]
@@ -3307,13 +3344,13 @@ def review_page(data: dict[str, pd.DataFrame]) -> None:
     if selected_source != "All sources":
         filtered = records_for_source(filtered, selected_source)
 
-    st.caption(f"Review queue source: {records_source}")
+    st.caption(f"Review queue: {records_source}")
     st.dataframe(
         workbench_record_table(filtered),
         hide_index=True,
         use_container_width=True,
         height=300,
-        column_config={"Primary document URL": st.column_config.LinkColumn("Primary document URL", display_text=None)},
+        column_config={"Primary document": st.column_config.LinkColumn("Primary document", display_text="Open")},
     )
 
     if filtered.empty:
