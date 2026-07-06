@@ -1,169 +1,113 @@
-# Carbon Methodology Intelligence Platform
+# Carbon Methodology Extraction Workbench
 
-**Carbon Methodology Intelligence Platform / SourceOps Workbench for carbon methodology intelligence.**
+This Streamlit app demonstrates how methodology and standards information can be extracted from public carbon registries and standards bodies, even when each source publishes information differently.
 
-`Carbon Methodology SourceOps Workbench` is a local Streamlit prototype that maps the carbon methodology source universe, tracks extraction readiness, runs source-specific ingestion workflows, preserves evidence behind extracted records, and shows how AI can responsibly assist messy review tasks — without blindly scraping the web.
+The public app is a four-page workbench:
 
-## Problem
+1. **Home** - what the app does, supported sources, and where to start.
+2. **Extract** - choose a source, view the latest extracted records, and optionally check for updates.
+3. **Review** - inspect records and evidence, save review decisions, and export reviewed records.
+4. **About** - plain-language explanation of the extraction and human review approach.
 
-Carbon methodology information is scattered across heterogeneous official sources: structured HTML tables, methodology catalogues with detail pages, PDF / document families, adopted external methods, JS-heavy portals, and small programmes with no clear methodology page. One generic scraper is not enough.
+## What the App Does
 
-## Six Ideas This App Is Built Around
+- Finds public methodology and standards pages.
+- Extracts methodology or document records.
+- Captures primary and supporting source documents.
+- Routes extracted records for human review.
+- Exports reviewed outputs.
 
-1. **Source map.** A picture of the source universe and how heterogeneous it is.
-2. **Assembly line.** A pipeline from official source to review-ready catalogue export, with operational controls to run each step.
-3. **Coverage progress tracker.** Source-by-source implementation state, plus onboarding waves.
-4. **Evidence-first review.** Every extracted record is paired with its supporting material, its issues, and an export handoff — nothing goes to a catalogue automatically.
-5. **Connector governance.** Source verification, connector capability metadata, and reviewer decisions make the workbench easier to demo and easier to extend.
-6. **AI-assisted analyst.** A roadmap for AI to help on messy cases with clear evidence and human control.
-
-The current app is framed as an ecosystem intelligence platform first, with SourceOps workflows available as operational controls behind the platform views.
-
-## App Pages
-
-1. **Home** - executive platform snapshot, plain-language purpose, current priorities, and advanced landscape details.
-2. **Programme Intelligence** - programme dossier with source status, URLs, connector approach, verification checklist, and loaded evidence.
-3. **Source Explorer** - simple source exploration flow plus advanced source checks, extraction, and source-resolution controls.
-4. **Review Desk** - candidate methods, evidence documents, issues, review decisions, and exports.
-5. **Connector Roadmap** - future build planning from source intelligence and verification plans.
-6. **Method / About** - explanation of the SourceOps method, evidence model, and verification-before-implementation workflow.
-
-## Connector Governance
-
-The app exposes a lightweight connector manifest and richer review handoff files:
-
-- **Connector capability matrix** - derived from the Source Registry and research matrix; describes connector status, run mode, expected outputs, capabilities, and next action.
-- **Source verification results** - produced from source access checks; records whether a URL was reached, what type of content was found, and the recommended next action before connector coding.
-- **Normalized source documents** - derived from extracted supporting links; preserves the original extraction output while creating a document/evidence inventory for review.
-- **Review decisions** - optional local reviewer decisions saved only when explicitly requested; extracted records are not overwritten.
-- **MethodUnit dossier** - combines candidate records, evidence links, source-resolution context, issues, and connector metadata for one programme.
-
-## Source Intelligence Inputs
-
-The Connector Roadmap and Programme Intelligence pages read research-derived source intelligence from `data/source_intelligence/`:
-
-- `connector_source_matrix_synthesized.csv` powers the Connector Roadmap table and roadmap metrics.
-- `connector_source_matrix_synthesized.json` provides metadata such as the matrix generation timestamp.
-- `source_verification_plan.csv` lists URLs and assumptions to verify before coding new connectors.
-
-This supports a verification-before-implementation workflow: research identifies where methodology information appears to live, analysts verify the source behavior, and only then should a connector be implemented.
-
-## User Flow
-
-1. **Home** answers the state of the source landscape.
-2. **Programme Intelligence** answers what is known about one programme.
-3. **Source Explorer** runs or verifies a source.
-4. **Review Desk** shows what records and evidence are ready for review or export.
-5. **Connector Roadmap** turns research audits into future build planning.
-6. **Method / About** explains the operating method and review guardrails.
-
-## Workflow
+The normal user path is:
 
 ```text
-Official source
--> source access check
--> source-specific extraction
--> source resolution where needed
--> extracted methodology records
--> supporting links separated
--> issues logged
--> human review
--> catalogue export
+Home -> Extract -> Review -> Export reviewed records
 ```
 
-Source-specific extractors are small, source-aware ingestion routines — not one generic scraper. Extracted records are never automatically approved; they are review-ready outputs.
+## Public Source Coverage
 
-## Currently Supported Source-Specific Extractors
-
-The public Extract page currently presents **10 stable extractors** plus **2 experimental source checks**. The source-resolution routine for Artisan C-sink is retained outside the public Extract flow for internal diagnostics and package generation.
+The app currently presents **10 stable extractors** and **2 experimental source checks**.
 
 Stable extractors:
 
-- **Climate Action Reserve** — working structured-table extraction.
-- **City Forest Credits** — document / protocol-family extraction; linked PDFs are discovered but not fully parsed.
-- **Climate Forward** — forecast-methodology table parser with per-methodology detail-page follow-through; captures title, version, date issued, development status, detail URL and primary PDF for each forecast methodology, and preserves per-methodology supporting PDFs (public comments, summaries, errata) plus program-level document links (screening form, template, agreement, approval manual) as supporting documents. First connector implemented from the research → verification → connector workflow.
-- **American Carbon Registry (ACR)** — approved-methodology table parser with per-methodology detail-page follow-through; captures ANAB sectoral scope, title, version, detail URL and the current approved PDF (identified via the `Download the methodology` anchor) for each row. Historical PDFs under `Previous Approved Versions` are preserved as supporting documents tagged `evidence_stage: historical_version` and are never attached as the primary document; process-documentation PDFs (peer review, public comments, summaries of changes) and reference documents (ERT calculators, `.xlsx` templates) are captured with appropriate stage tags. Detail-page fetch failures log per-methodology errors without dropping the index row.
-- **Social Carbon** — card-layout index scanner (no `<table>`) that detects each `SCM####:` methodology heading, resolves its `/scm####` detail URL, and follows it. On the detail page the current PDF is identified via the top `View Methodology` anchor; status is parsed from the `Status: Live/Inactive since <date>` line; the `Modules / Key Sources` block and `Version History.` H4 chain are captured into `notes` (labelled `sector:`, `modules:`, `version_history:` — none of these have first-class schema columns). Historical version PDFs, public-comment PDFs, feasibility templates, VVB checklists, and any board/sunset decision documents are captured as supporting documents with evidence-stage tags. Inactive methodologies (currently SCM0001) are still ingested with `status = Inactive since <date>` — reviewers decide whether to keep them.
-- **ART/TREES** — document-family scanner (not a methodology catalogue). Iterates a fixed set of four public pages (`/standards/trees-3-0/` current, `/standards/trees-2-0/` prior, `/standards/trees-1-0/` retired, `/verification/` current) and emits **one** `methodunit_candidate` per page with `unit_type = "standard_document"` — the canonical English standard PDF for that TREES version (or the TREES Validation & Verification Standard on the verification page), picked by a filename-classifier that skips public-comment drafts, statements of reasons, summaries of changes, and HFLD/reversal-tool addenda. Every other document on the same page — templates, forms, guidance, primers, statements of reasons, summaries of changes, stakeholder comment logs, webinar decks, executive summaries, VVB templates, VVB directory, per-language variants — is captured as a `supporting_document` tagged with a `document_type:` in notes (one of `standard`, `validation_verification_standard`, `template`, `guidance`, `primer`, `statement_of_reasons`, `summary_of_changes`, `stakeholder_comments`, `public_consultation_draft`, `webinar_presentation`, `executive_summary`, `vvb_template`, `vvb_directory`, `supporting`). Non-schema fields (`document_type`, `version`, `effective_date`, `language`, `family`, `lifecycle_status`) live in `notes` with labels. Each record's `status` reflects the version's lifecycle (Current / Prior / Retired). Deliberately avoids treating any TREES document as a methodology — the connector honours the source's "single standard + document family" architecture.
-- **Puro Earth** — two-page scanner that combines the public methodologies landing (`/cdr-infrastructure/methodologies/`, 8 H3 cards with `learn more` detail links) with the document library (`/cdr-infrastructure/methodologies/document-library/`, 66 HubSpot-hosted PDFs grouped by H3). For each landing methodology (Biochar, Direct Air Capture and Ocean Storage, Microalgae Carbon Fixation and Sinking, Terrestrial Storage of Biomass, Geologically Stored Carbon, Enhanced Rock Weathering, Carbonated Materials, Marine Anoxic Carbon Storage) the extractor finds all library PDFs whose H3 heading matches the methodology name (direct + fuzzy substring), rejects transition-plan/clarification/annex/consultation drafts by filename, then picks the highest-scoring current PDF by (edition year, version number, shorter filename). Both anchor text and href are URL-decoded before matching so percent-encoded filenames like `ERW%20Edition%202025%20v2.pdf` parse correctly. Historical PDFs and transition plans are captured as supporting documents tagged `evidence_stage: historical_version` / `evidence_stage: transition_plan`; programme-level documents under `Multi-program requirements` (Certification Procedures, Common Criteria, Puro Standard General Rules, Article 6, Additionality, Stakeholder Engagement, SDG Assessment, Methodology Development, Validation & Verification, Biomass Sourcing) are captured with `evidence_stage: programme_requirement`. Category / removal type / version / status stored in `notes` with labels. Uses the verified canonical URLs exclusively; the profile URL `https://puro.earth/carbon-removal-methods` is also accepted because it 301-redirects to the canonical page.
-- **Cercarbono** — single-page card scanner for the public English methodologies page (no detail pages, no `<table>`). Bounded to the "Explore approved methodologies" H2 section — H4 methodology cards under `Carbon programme`, `Biodiversity programme`, and `Circular economy programme` H3s are emitted as native records with `unit_type = "methodology"`, primary PDF taken from the card's `Download methodology` anchor, and version parsed from the filename (e.g. `V-3.1` → `V3.1`). H4 sector rows under the `CDM methodologies` H3 (Energy, Industry, Construction, Transport, Mining, Metal, Fugitive Emissions, Waste Management, Land Use) are emitted with `unit_type = "adopted_external_method"` and the sector's aggregate `.xlsx` catalogue as `document_url`, with a labelled `adopted_external_methodology` note explaining the catalogue contains multiple CDM methods. Machine codes are not published on the surface — reviewers open the PDF/XLSX for the Cercarbono internal code — so `methodunit_code` is left blank. Uses the verified `https://cercarbono.com/methodologies/` URL exclusively — the `/en/methodologies/` and `/en/metodologias/` paths return 404.
-- **BioCarbon Registry (BCR)** — single-page card scanner for the public AFOLU sector page (no detail pages, no `<table>`). Iterates every `<h3>` matching `BCR####`, walks up the nested Elementor row containers to find the sibling widget holding the card's PDF anchors, and picks the "Methodological Document" anchor as the primary PDF. "Public Consultation Results/Document" PDFs, "Previous Versions" `.zip` bundles, and "Guidelines…" PDFs are captured as supporting documents tagged with matching evidence stages. A sibling "Coastal Ecosystems" card without a BCR code but linking to a CDM `AR-AM0014` PDF is emitted as `unit_type = "adopted_external_method"` with the CDM code extracted from the filename and a labelled `adopted_external_methodology` note. Sector (`AFOLU Sector`) is stored in `notes` since `CANDIDATE_SCHEMA` has no sector column dedicated to the H1 label. Uses the verified `https://biocarbonstandard.com/en/afolu/` URL exclusively — the JS-heavy `biocarbonregistry.com` domain is not consulted.
-- **Plan Vivo** — single-page article scanner for the PV Climate approved-methodologies page (no detail pages, no `<table>`). Iterates leaf `<article>` blocks — skipping the outer wrapper article — to detect each `PM###` methodology, extracting title, description, and a `Status: … Type: … Version …: PM### V… | Assessment Report (Active from: …) Developer: … Reviewers: …` metadata line. The primary PDF is chosen from the S3-hosted `PM### V#.#` / `View PM###` anchors; the paired assessment / review report is captured as a supporting document tagged `evidence_stage: assessment`. Non-schema fields (`type`, `active_from`, `developer`, `reviewers`, `description`) are stored in `notes` with labels. Uses the verified `/projects/certify-a-project/pvclimate/methodologies/approved-methodologies` URL exclusively — the deprecated technical-library path is not consulted.
+- Climate Action Reserve
+- City Forest Credits
+- Climate Forward
+- American Carbon Registry / ACR
+- Social Carbon
+- Plan Vivo
+- BioCarbon Registry / BCR
+- Cercarbono
+- Puro Earth
+- ART/TREES
 
 Experimental source checks:
 
-- **International Carbon Registry / ICR** — included for source-access testing; update checks may find M-ICR codes and detail URLs, but no saved records are included in the current package.
-- **Asia Carbon Institute** — included for source-access testing; update checks can fail due to SSL/certificate/source-access behavior and may require manual verification or connector configuration.
+- International Carbon Registry / ICR
+- Asia Carbon Institute
 
-Source-resolution routine retained outside the public Extract flow:
+Experimental checks are included for source-access testing. They may not have saved records in the current package, and update checks can depend on source availability, SSL/certificate behavior, rate limits, or page changes.
 
-- **Artisan C-sink** — no clean methodology index; the routine captures a document-family record, preserves clarification documents, and logs missing/unstable document links as issues.
+Artisan C-sink is retained as a source-resolution routine outside the public Extract selector. It is included in the latest saved package generation, but it is not part of the public source list.
 
-Other programmes appear in Home, Programme Intelligence, and Connector Roadmap views but do not yet have implemented extractors — the researched candidates awaiting a connector are listed under Connector Roadmap → "Next to Build" (Isometric, Credible Carbon).
+## Latest Saved Extraction Package
 
-## Source Resolution
+The Extract page automatically reads the latest saved package from:
 
-Some standards do not publish a clean, dedicated methodologies section. Some have only one methodology-like document, some use a single standard PDF, some point to adopted methods, some require an access request, and some remain unresolved until an official platform is accessible.
+```text
+outputs/demo_latest/
+```
 
-Source Resolution handles those cases before a normal extractor is designed. Valid outcomes include automated extraction, document-family capture, adopted-method pointer, access request, unresolved, or park.
+At the current head, that package contains:
 
-The current implemented example is **Artisan C-sink**:
+- `methodunit_candidates_review.csv` - 145 extracted methodology/document records
+- `extracted_source_links_full.csv` - 704 evidence/source-link rows
+- `source_documents.csv` - 677 normalized source-document rows
+- `extraction_errors.csv` - 0 extraction errors
+- `source_resolution_results.csv` - 1 source-resolution row retained outside the public Extract flow
 
-- no separate methodology index;
-- methodology information lives in the Global Artisan C-Sink Standard page/PDF plus clarification documents;
-- methodology model is a single protocol/document family;
-- recommended catalogue action is `capture-document-family`;
-- recommended ingestion mode is semi-automated extraction or one-shot manual capture.
+The package is generated from the 10 stable extractors plus the retained Artisan C-sink source-resolution routine. ICR and Asia Carbon Institute are available for update checks but are not part of the stable saved package.
 
-The app fetches only the public source page, does not parse full PDFs, creates one pending-review document-family record, preserves clarification documents as Supporting Material, and logs missing or unstable document links as Issues. This directly addresses standards with one or a few methodologies where a full catalogue scraper would be unnecessary.
+## Extract Page
 
-The app also loads `data/source_resolution_audit_mid_activity.csv` when present. That file is a review-ready source-resolution audit for mid-activity standards, not approved catalogue truth. It classifies sources into catalogue actions such as automated extraction, document-family capture, adopted-method pointer, access request, project-derived review, unresolved, or parked. Advanced details summarize it, and Review Desk surfaces audit rows that need issue records or follow-up. Audit rows do not automatically generate methodology catalogue exports.
+Use Extract to choose a carbon standard or registry and view the latest extracted records for that source. The page shows:
 
-## Session-State Model
+- source pattern
+- what is extracted
+- primary source URL
+- latest extracted records
+- evidence/source-link counts
+- extraction issues, if any
 
-The app treats extraction and source resolution as producer steps, and everything downstream as consumers of the latest outputs:
+The optional **Check for updates** action tests the public source. If an update check succeeds, the page displays updated results. If it fails, the latest saved records remain visible when available.
 
-- **Producers**: Source Explorer and its advanced source-check, extraction, and source-resolution controls.
-- **Consumers**: Review Desk (Candidate Methods, Evidence Documents, Issues, Review Decisions, Exports).
+## Review Page
 
-All producers write to the same session-state keys (`candidate_extraction_results`, `candidate_extraction_errors`, `candidate_extraction_enrichment_metrics`, `candidate_extraction_sources_attempted`). Consumers read those same keys and fall back to the latest saved `outputs/` CSVs if no session data is loaded. A quick demo run or Source Resolution run therefore populates the same downstream tabs as a full extraction run.
+Use Review to make human decisions on extracted records.
 
-## Evidence and Review Rules
+The page supports:
 
-- Extracted records are not approved methodologies. They are review-ready candidates.
-- `review_status = pending_review` means human review is still required.
-- **High confidence** means the extraction looked structurally strong. It does not mean the methodology is legally, commercially, or carbon-market approved.
-- For ICR, discovery records with suspicious or incomplete titles are labelled `needs_research` even when codes and detail URLs are found. These records are preserved, but they should be treated as discovery records until titles are manually verified.
-- Supporting documents, development pages, navigation links, and excluded rows are preserved separately from extracted methodology records.
+- source filtering
+- review status filtering
+- selecting a record
+- opening the primary document
+- inspecting supporting document links
+- adding a reviewer note
+- saving a review decision
+- exporting reviewed records
 
-## Coverage Approach
+Review decisions are:
 
-Coverage expansion follows onboarding waves — not a blind scrape of every standard:
+- Approve
+- Needs correction
+- Reject
 
-1. **Wave 1** — Stabilize working extractors (CAR, ICR discovery, ACI as source exception).
-2. **Wave 2** — Add reachable document-family sources (Plan Vivo, Nori, ART/TREES, Peatland Code).
-3. **Wave 3** — Add more catalogue-style sources (ACR after URL repair, Climate Forward, BioCarbon Registry, Cercarbono).
-4. **Wave 4** — Handle adopted-method sources (native vs adopted CDM / Verra / Gold Standard).
-5. **Wave 5** — Complex / high-value sources (CDM, JCM, Verra, Gold Standard, Isometric, Puro Earth).
-6. **Wave 6** — Long-tail unresolved sources — manual investigation and periodic checks.
+Saved decisions are written to the existing review-decision output and can be downloaded from the Review page.
 
-## AI-Assisted Scaling (Roadmap)
+## About the Approach
 
-No AI API is called in the current prototype. The AI-Assisted Scaling page describes:
+Carbon standards publish methodology information in many shapes: catalogue pages, static tables, document libraries, methodology cards, and standard-version document families. The app uses source-specific extractors for these patterns instead of treating every source as the same generic scrape.
 
-- Messy cases where AI can help (PDF metadata, ambiguous link classification, ICR titles, adopted CDM detection, duplicate/alias detection).
-- A future AI workflow: raw source text → AI suggestion with evidence → human approve / edit / reject → catalogue export.
-- A future AI task output schema (`task_id`, `program_name`, `problem_type`, `raw_text_context`, `current_extracted_fields`, `ai_suggestion`, `evidence_text`, `confidence`, `reviewer_decision`).
-- Guardrails: every AI suggestion must carry its evidence, a human must approve, and deterministic source-specific extractors remain the first layer.
-
-## Limitations
-
-- Linked PDFs are discovered where visible, but full PDF text is not fetched or parsed.
-- No JavaScript-heavy portals are automated yet.
-- No logins, paywalls, CAPTCHAs, DocSend gates, or access controls are bypassed.
-- No accounts are created.
-- No database is used; review decisions are not persisted across sessions.
-- Classification is rule-based and requires human review.
+Extracted records are review candidates. The app does not decide final market eligibility, interpret legal terms, or approve methodologies. A reviewer should open the evidence documents and decide whether each record is approved, rejected, or needs correction.
 
 ## How to Run Locally
 
@@ -179,60 +123,22 @@ Run the app:
 streamlit run app.py
 ```
 
-Expected input files under `data/`:
+## Key Files
 
-- `source_profiles_final_fixed.csv`
-- `connector_strategy_fixed.csv`
-- `extraction_waves_fixed.csv`
-- `qa_flags_fixed.csv`
-- `next_actions_fixed.csv`
-- `source_resolution_audit_mid_activity.csv` (optional but used for the mid-activity source-resolution audit layer)
+- `app.py` - Streamlit workbench UI
+- `pipeline.py` - shared schemas, loading, output helpers, and extractor orchestration
+- `extractors.py` - source-specific extraction routines
+- `scripts/generate_demo_outputs.py` - regenerates the latest saved extraction package
+- `scripts/verify_source_intelligence.py` - source access verification utility
 
 ## Outputs
 
-The Review Desk -> Exports tab can write timestamped files to `outputs/`, including:
+Reviewed and extracted outputs are stored under `outputs/`. Common files include:
 
-- `methodunit_candidates_review_YYYYMMDD_HHMMSS.csv`
-- `extracted_source_links_full_YYYYMMDD_HHMMSS.csv`
-- `source_documents_YYYYMMDD_HHMMSS.csv`
-- `extraction_errors_YYYYMMDD_HHMMSS.csv`
-- `source_resolution_results_YYYYMMDD_HHMMSS.csv`
-- `source_verification_results_YYYYMMDD_HHMMSS.csv`
-- `review_decisions_YYYYMMDD_HHMMSS.csv`
-- `connector_manifest_YYYYMMDD_HHMMSS.csv`
-- `source_registry_YYYYMMDD_HHMMSS.csv`
-- `qa_flags_YYYYMMDD_HHMMSS.csv`
+- `methodunit_candidates_review.csv`
+- `extracted_source_links_full.csv`
+- `source_documents.csv`
+- `extraction_errors.csv`
+- `review_decisions.csv`
 
-### Latest Saved Extraction Package
-
-`scripts/generate_demo_outputs.py` regenerates `outputs/demo_latest/` from the 10 stable extractors (CAR, City Forest Credits, Climate Forward, ACR, Social Carbon, Plan Vivo, BioCarbon Registry, Cercarbono, Puro Earth, ART/TREES) plus the Artisan C-sink source-resolution routine retained outside the public Extract flow. The 2 experimental source checks (ICR and Asia Carbon Institute) are available for update/access testing but are not part of the stable saved package. At the current head, the regenerated package produces:
-
-| Source | Records | Total links | Issues |
-|---|---:|---:|---:|
-| Climate Action Reserve | 33 | 150 | 0 |
-| City Forest Credits | 33 | 65 | 0 |
-| Climate Forward | 7 | 68 | 0 |
-| American Carbon Registry (ACR) | 13 | 177 | 0 |
-| Social Carbon | 11 | 63 | 0 |
-| Plan Vivo | 2 | 4 | 0 |
-| BioCarbon Registry | 16 | 47 | 0 |
-| Cercarbono | 17 | 17 | 0 |
-| Puro Earth | 8 | 20 | 0 |
-| ART/TREES | 4 | 65 | 0 |
-| Artisan C-sink | 1 | 28 | 0 |
-
-Aggregated CSV row counts:
-
-- `methodunit_candidates_review.csv` — **145** rows
-- `extracted_source_links_full.csv` — **704** rows
-- `source_documents.csv` — **677** rows
-- `extraction_errors.csv` — **0** rows
-- `source_resolution_results.csv` — 1 row
-
-## Next Development Priorities
-
-1. Repair or confirm remaining stale source-registry URLs before building more extractors.
-2. Follow the Connector Roadmap → "Next to Build" list — ART/TREES, Isometric, Credible Carbon are the researched candidates whose extractors are not yet implemented.
-3. Add controlled PDF metadata extraction for document-first sources.
-4. Prototype a bounded AI-assist step for one messy case (for example, ICR title suggestions from detail-page text).
-5. Add catalogue import validation once the extracted-record and review-decision schemas stabilize.
+Timestamped output files may also be created when export helpers are used.

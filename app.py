@@ -2566,6 +2566,12 @@ def overview_page(data: dict[str, pd.DataFrame]) -> None:
     st.write("- Routes records for human review")
     st.write("- Exports reviewed outputs")
 
+    st.subheader("What to Do First")
+    st.write(
+        "Start on Extract, choose a source, and inspect the latest extracted records. "
+        "Then use Review to approve, reject, or mark records as needing correction before export."
+    )
+
 
 def source_registry_page(data: dict[str, pd.DataFrame]) -> None:
     st.header("Source Registry")
@@ -3325,7 +3331,7 @@ def extract_page(data: dict[str, pd.DataFrame]) -> None:
     is_experimental = source in EXPERIMENTAL_EXTRACTORS
     if is_experimental:
         st.caption(
-            "Experimental source check: this source may not have saved records and live checks may depend on source access."
+            "Experimental source check: this source may not have saved records and update checks may depend on source access."
         )
 
     st.subheader("Source Profile")
@@ -3371,7 +3377,7 @@ def extract_page(data: dict[str, pd.DataFrame]) -> None:
         if update_records.empty:
             st.info("Update check completed, but no methodology/document records were found for this source.")
         else:
-            st.caption("Displaying updated results from this session.")
+            st.caption("Displaying updated results from the update check.")
     elif update_failed:
         if saved_records.empty:
             if is_experimental:
@@ -3399,10 +3405,10 @@ def extract_page(data: dict[str, pd.DataFrame]) -> None:
                     st.warning("This appears to be a source access or SSL certificate issue.")
     elif saved_records.empty:
         if is_experimental:
-            st.info("No saved extraction is available for this experimental source. Use Check for updates to test the live source.")
+            st.info("No saved extraction is available for this experimental source. Use Check for updates to test source access.")
         else:
             st.info(f"No saved extraction is available for {source}.")
-            st.caption("Use Check for updates to test the live source.")
+            st.caption("Use Check for updates to test source access.")
     else:
         st.success(f"Showing latest extracted records for {source}.")
 
@@ -3642,12 +3648,6 @@ def about_page(data: dict[str, pd.DataFrame]) -> None:
         "The app does not decide final market eligibility, interpret legal terms, approve methodologies, or guarantee that "
         "a source has not changed since extraction. Ambiguous records stay in the review workflow."
     )
-
-    with st.expander("Advanced diagnostics", expanded=False):
-        connector_manifest_panel(data, "about_connector_manifest")
-        verification_results = data.get("plan_verification_results", pd.DataFrame())
-        if not verification_results.empty:
-            show_dataframe(verification_results, "about_source_verification_results", height=260)
 
 
 def main() -> None:
